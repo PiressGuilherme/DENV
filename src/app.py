@@ -64,6 +64,23 @@ def _fase_da_linha(r) -> str:
     return "pendente"
 
 
+# Cor (hex) do badge por fase, para o HTML inline da célula.
+_HEX_FASE = {
+    "pendente": "#9e9e9e",
+    "coletada": "#2196f3",
+    "extraida": "#ff9800",
+    "pcr_feito": "#4caf50",
+}
+
+
+def _badge_html(fase: str) -> str:
+    """HTML do badge da fase (renderizado via html_columns do NiceGUI)."""
+    return (
+        f'<span style="padding:2px 8px;border-radius:10px;color:white;'
+        f'font-size:11px;background:{_HEX_FASE[fase]}">{_LABEL_FASE[fase]}</span>'
+    )
+
+
 def _linha_para_dict(r) -> dict:
     """Converte uma Row do SQLite no dict que o AG-Grid consome."""
     fase = _fase_da_linha(r)
@@ -75,38 +92,31 @@ def _linha_para_dict(r) -> dict:
         "municipio": r["municipio"] or "",
         "data_coleta": r["data_coleta"] or "",
         "caso": r["caso"] or "",
-        "fase": _LABEL_FASE[fase],
-        "fase_cor": _COR_FASE[fase],
+        "fase": _badge_html(fase),              # HTML (ver _COL_FASE_IDX em html_columns)
         "flags": r["flags"] or "",
         "n_origem": r["n_origem"],
     }
 
 
-# Renderer de célula que pinta o badge da fase (HTML inline no AG-Grid).
-_BADGE_RENDERER = (
-    "params => `<span style=\"padding:2px 8px;border-radius:10px;color:white;"
-    "font-size:11px;background:${({Pendente:'#9e9e9e',Coletada:'#2196f3',"
-    "'Extraída':'#ff9800','PCR feito':'#4caf50'})[params.value]||'#9e9e9e'}\">"
-    "${params.value}</span>`"
-)
+# Índice (0-based) da coluna "Fase" — registrado como html_column na grade.
+_COL_FASE_IDX = 6
 
 
 def _colunas() -> list[dict]:
+    # Checkbox de seleção: configurado via rowSelection (API v33+), não por colDef.
+    # Larguras explícitas (sem 'flex') para não conflitar com auto_size_columns.
     return [
-        {"headerName": "", "checkboxSelection": True, "headerCheckboxSelection": True,
-         "width": 48, "pinned": "left", "filter": False, "sortable": False},
-        {"headerName": "NI", "field": "ni", "filter": True, "width": 110},
-        {"headerName": "Número", "field": "numero", "type": "numericColumn",
-         "sort": None, "hide": False, "width": 100},
-        {"headerName": "Ano", "field": "ano", "width": 80},
-        {"headerName": "Município", "field": "municipio", "filter": True, "flex": 1},
-        {"headerName": "Data Coleta", "field": "data_coleta", "width": 120},
-        {"headerName": "Caso", "field": "caso", "width": 110},
-        {"headerName": "Fase", "field": "fase", "width": 110,
-         ":cellRenderer": _BADGE_RENDERER},
-        {"headerName": "Flags", "field": "flags", "filter": True, "flex": 1},
+        {"headerName": "NI", "field": "ni", "filter": True, "width": 120,
+         "pinned": "left"},
+        {"headerName": "Número", "field": "numero", "type": "numericColumn", "width": 110},
+        {"headerName": "Ano", "field": "ano", "width": 90},
+        {"headerName": "Município", "field": "municipio", "filter": True, "width": 240},
+        {"headerName": "Data Coleta", "field": "data_coleta", "width": 130},
+        {"headerName": "Caso", "field": "caso", "width": 120},
+        {"headerName": "Fase", "field": "fase", "width": 130},  # idx 6: html_columns
+        {"headerName": "Flags", "field": "flags", "filter": True, "width": 260},
         {"headerName": "Nº origem", "field": "n_origem", "type": "numericColumn",
-         "width": 100},
+         "width": 110},
     ]
 
 
@@ -138,23 +148,35 @@ class FaseTab:
             ui.space()
             self.label_contagem = ui.label().classes("text-grey-7")
 
+        dados = self._carregar_dados()
         self.grid = ui.aggrid({
             "columnDefs": _colunas(),
-            "rowSelection": "multiple",
-            "suppressRowClickSelection": True,
+            # API de seleção do AG-Grid v33+ (checkboxSelection no colDef foi removido):
+            "rowSelection": {
+                "mode": "multiRow",
+                "checkboxes": True,
+                "headerCheckbox": True,
+                "enableClickSelection": False,
+            },
             "defaultColDef": {"sortable": True, "resizable": True},
             ":getRowId": "params => params.data.chave",
-            "rowData": [],
-        }).classes("w-full").style("height: 65vh")
+            "rowData": dados,  # já com dados no 1º paint (evita grade em branco)
+        }, html_columns=[_COL_FASE_IDX], auto_size_columns=False).classes(
+            "w-full"
+        ).style("height: 65vh")
+        self.label_contagem.text = f"{len(dados)} amostra(s)"
 
     def where(self) -> Optional[str]:
         if self.fase == "geral":
             return None
         return db.where_por_fase(self.fase)
 
-    def recarregar(self) -> None:
+    def _carregar_dados(self) -> list[dict]:
         rows = db.listar_amostras(self.app.con, where=self.where())
-        dados = [_linha_para_dict(r) for r in rows]
+        return [_linha_para_dict(r) for r in rows]
+
+    def recarregar(self) -> None:
+        dados = self._carregar_dados()
         self.grid.options["rowData"] = dados
         self.grid.update()
         self.label_contagem.text = f"{len(dados)} amostra(s)"
