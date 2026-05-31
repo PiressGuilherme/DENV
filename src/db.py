@@ -123,10 +123,98 @@ def _migrar(con: sqlite3.Connection) -> None:
     con.commit()
 
 
+def _reclassificar_2026(con: sqlite3.Connection) -> int:
+    """Reconcilia bancos já populados com a regra de reclassificação 2026.
+
+    As 73 amostras D (ni_ano=2026, nº 1–976) que foram importadas antes da regra
+    estão como ``D{n}/25`` (ano_verdade=2025) + flag ANO_NI_DIVERGE. Esta migração:
+
+      - move ano_verdade -> 2026 e remapeia a chave para ``D{n}/26``;
+      - recalcula as flags (a divergência some, pois ni_ano passa a bater);
+      - PRESERVA o progresso de reprocesso/rejeição e as datas;
+      - atualiza as referências em ``eventos`` (FK por chave).
+
+    Idempotente: só age sobre linhas que ainda não foram reclassificadas. Roda em
+    transação; se a nova chave já existir (colisão), pula aquela linha por
+    segurança (não há colisão nos dados atuais). Importado tardiamente para
+    evitar ciclo de import com parsing.
+    """
+    from src.parsing import (
+        calcular_flags,
+        montar_chave,
+        reclassificar_2026,
+    )
+
+    # Candidatas ainda não reclassificadas: ni_ano=2026, prefixo D, nº 1–976,
+    # mas ano_verdade ainda != 2026.
+    candidatas = con.execute(
+        "SELECT chave, prefixo, numero_sequencial, ni_ano, ano_verdade, "
+        "data_coleta, data_sintomas "
+        "FROM amostras WHERE prefixo = 'D' AND ni_ano = 2026 "
+        "AND numero_sequencial BETWEEN 1 AND 976 AND ano_verdade != 2026"
+    ).fetchall()
+
+    if not candidatas:
+        return 0
+
+    # A chave é PK referenciada por eventos(chave). Como remapeamos amostras E
+    # eventos no mesmo passo, desligamos a checagem de FK durante a migração
+    # (deve ser feito fora de qualquer transação) e religamos ao final.
+    con.commit()  # encerra transação implícita pendente
+    con.execute("PRAGMA foreign_keys = OFF")
+
+    movidas = 0
+    for r in candidatas:
+        if not reclassificar_2026(r["prefixo"], r["numero_sequencial"], r["ni_ano"]):
+            continue
+        nova_chave = montar_chave(r["prefixo"], r["numero_sequencial"], 2026)
+        # Evita colisão (não esperada nos dados atuais).
+        existe = con.execute(
+            "SELECT 1 FROM amostras WHERE chave = ?", (nova_chave,)
+        ).fetchone()
+        if existe and nova_chave != r["chave"]:
+            continue
+        flags = calcular_flags(
+            ni_ano=r["ni_ano"],
+            ano_verdade_=2026,
+            data_coleta=_parse_iso(r["data_coleta"]),
+            data_sintomas=_parse_iso(r["data_sintomas"]),
+        )
+        # Atualiza a amostra in-place (preserva progresso/rejeição/datas)...
+        con.execute(
+            "UPDATE amostras SET chave = ?, ano_verdade = 2026, flags = ?, "
+            "atualizado_em = CURRENT_TIMESTAMP WHERE chave = ?",
+            (nova_chave, flags, r["chave"]),
+        )
+        # ...e as referências de auditoria (FK conferida só no commit).
+        con.execute(
+            "UPDATE eventos SET chave = ? WHERE chave = ?",
+            (nova_chave, r["chave"]),
+        )
+        movidas += 1
+
+    con.commit()
+    con.execute("PRAGMA foreign_keys = ON")  # religa a checagem de FK
+    return movidas
+
+
+def _parse_iso(valor) -> Optional["datetime"]:
+    """Converte 'YYYY-MM-DD' (ou None) em datetime para recálculo de flags."""
+    from datetime import datetime
+
+    if not valor:
+        return None
+    try:
+        return datetime.fromisoformat(str(valor))
+    except ValueError:
+        return None
+
+
 def criar_schema(con: sqlite3.Connection) -> None:
     """Cria tabelas e índices (idempotente — usa IF NOT EXISTS) e migra colunas."""
     con.executescript(_SCHEMA)
     _migrar(con)
+    _reclassificar_2026(con)
     con.commit()
 
 

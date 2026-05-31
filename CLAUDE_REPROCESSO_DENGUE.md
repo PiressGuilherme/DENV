@@ -180,6 +180,18 @@ Regra de etapas: o reprocesso é sequencial. A UI pode alertar (não bloquear) s
 > ano, município, datas, fase, etapas Sim/Não, motivo de rejeição, flags, n_origem) — **nunca** as
 > colunas antigas. Cards de métrica agora mostram também o % do total por etapa.
 
+> **RECLASSIFICAÇÃO 2026 (decisão posterior do usuário — exceção à regra 3.1):** amostras de
+> prefixo **D**, com NI já numerado em 2026 (`ni_ano=2026`) e número de **1 a 976**, pertencem à
+> série 2026 mesmo que a coleta tenha caído no fim de dez/2025. Para esse grupo o `ano_verdade` é
+> **forçado a 2026** (sobrepondo "a coleta vence"), elas **perdem a flag `ANO_NI_DIVERGE`** e
+> reordenam após as de 2025. Regra fixa em `parsing.reclassificar_2026` (vale em reimports) +
+> migração idempotente `db._reclassificar_2026` que reconcilia bancos já populados (remapeia
+> `D{n}/25→D{n}/26`, preserva progresso/rejeição e atualiza `eventos`). **73 amostras** movidas:
+> contagens passam de 3.488/2.018 (2025/2026) para **3.415/2.091**.
+
+> **Coluna "Data 1º Sintoma"** passou a ser exibida em todas as abas (o campo `data_sintomas` já
+> vinha do importer; antes só não era mostrado na grade).
+
 ---
 
 ## 5. Arquitetura de arquivos

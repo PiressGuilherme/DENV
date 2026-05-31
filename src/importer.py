@@ -142,7 +142,10 @@ def _ler_e_parsear(xlsx: Path, resultado: ResultadoImport) -> list[_Linha]:
             continue
 
         data_coleta = _como_data(d.get(COL_DATA_COLETA))
-        av = ano_verdade(p.ni_ano, data_coleta)
+        av = ano_verdade(
+            p.ni_ano, data_coleta,
+            prefixo=p.prefixo, numero_sequencial=p.numero_sequencial,
+        )
         if av is None:
             # Sem ano-de-verdade não há como posicionar a amostra; descarta.
             resultado.ignoradas_ni_invalido += 1
@@ -287,11 +290,15 @@ def importar(
 
 
 def _assert_sanidade(r: ResultadoImport) -> None:
-    """Asserts de sanidade da Seção 7 passo 8 (com tolerância pequena)."""
+    """Asserts de sanidade da Seção 7 passo 8.
+
+    Contagens por ano refletem a reclassificação 2026 (73 amostras D, ni_ano=2026,
+    nº 1–976, movidas de 2025 para 2026). Antes da regra: 3.488 / 2.018.
+    """
     assert r.total_ignoradas == 1276, f"ignoradas={r.total_ignoradas} (esperado 1276)"
     assert r.amostras_unicas == 5506, f"únicas={r.amostras_unicas} (esperado 5506)"
-    assert r.por_ano.get(2025) == 3488, f"2025={r.por_ano.get(2025)} (esperado 3488)"
-    assert r.por_ano.get(2026) == 2018, f"2026={r.por_ano.get(2026)} (esperado 2018)"
+    assert r.por_ano.get(2025) == 3415, f"2025={r.por_ano.get(2025)} (esperado 3415)"
+    assert r.por_ano.get(2026) == 2091, f"2026={r.por_ano.get(2026)} (esperado 2091)"
 
 
 def main(argv: list[str]) -> int:

@@ -97,6 +97,7 @@ def _linha_para_dict(r) -> dict:
         "ano": r["ano_verdade"],
         "municipio": r["municipio"] or "",
         "data_coleta": r["data_coleta"] or "",
+        "data_sintomas": r["data_sintomas"] or "",
         "caso": r["caso"] or "",
         "fase": _badge_html(fase),              # HTML (ver _COL_FASE_IDX em html_columns)
         "motivo": r["motivo_rejeicao"] or "",
@@ -106,7 +107,7 @@ def _linha_para_dict(r) -> dict:
 
 
 # Índice (0-based) da coluna "Fase" — registrado como html_column na grade.
-_COL_FASE_IDX = 6
+_COL_FASE_IDX = 7
 
 
 def _colunas(com_motivo: bool = False) -> list[dict]:
@@ -119,8 +120,9 @@ def _colunas(com_motivo: bool = False) -> list[dict]:
         {"headerName": "Ano", "field": "ano", "width": 90},
         {"headerName": "Município", "field": "municipio", "filter": True, "width": 240},
         {"headerName": "Data Coleta", "field": "data_coleta", "width": 130},
+        {"headerName": "Data 1º Sintoma", "field": "data_sintomas", "width": 140},
         {"headerName": "Caso", "field": "caso", "width": 120},
-        {"headerName": "Fase", "field": "fase", "width": 130},  # idx 6: html_columns
+        {"headerName": "Fase", "field": "fase", "width": 130},  # idx 7: html_columns
     ]
     if com_motivo:
         cols.append({"headerName": "Motivo", "field": "motivo", "filter": True,

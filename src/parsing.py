@@ -120,19 +120,61 @@ def _ano_de(d: DateLike) -> Optional[int]:
     return None
 
 
-def ano_verdade(ni_ano: Optional[int], data_coleta: DateLike) -> Optional[int]:
+# --------------------------------------------------------------------------- #
+# Reclassificação 2026 (decisão posterior do usuário)                          #
+# --------------------------------------------------------------------------- #
+# Exceção à regra "a Data da Coleta vence" (3.1): as amostras de prefixo D com
+# NI já numerado em 2026 e número de 1 a 976 pertencem à SÉRIE 2026, mesmo que a
+# coleta tenha caído no fim de dezembro/2025. Para esse grupo, o ano-de-verdade
+# é forçado a 2026 — assim elas perdem a flag ANO_NI_DIVERGE (ni_ano passa a
+# bater com ano_verdade) e reordenam corretamente após as de 2025.
+_RECLASS_2026_PREFIXO = "D"
+_RECLASS_2026_NI_ANO = 2026
+_RECLASS_2026_NUM_MIN = 1
+_RECLASS_2026_NUM_MAX = 976
+
+
+def reclassificar_2026(prefixo: str, numero_sequencial: int, ni_ano: Optional[int]) -> bool:
+    """True se a amostra cai na regra de reclassificação para 2026."""
+    return (
+        prefixo == _RECLASS_2026_PREFIXO
+        and ni_ano == _RECLASS_2026_NI_ANO
+        and _RECLASS_2026_NUM_MIN <= numero_sequencial <= _RECLASS_2026_NUM_MAX
+    )
+
+
+def ano_verdade(
+    ni_ano: Optional[int],
+    data_coleta: DateLike,
+    *,
+    prefixo: Optional[str] = None,
+    numero_sequencial: Optional[int] = None,
+) -> Optional[int]:
     """Calcula o ano-de-verdade da amostra (Seção 3.1).
 
     A Data da Coleta vence o ano embutido no NI. Se a Data da Coleta estiver
     ausente, cai para o ano do NI. Se ambos faltarem, retorna ``None``.
 
+    Exceção (reclassificação 2026): se ``prefixo``/``numero_sequencial`` forem
+    informados e a amostra cair em :func:`reclassificar_2026`, o ano é forçado a
+    2026, sobrepondo a Data da Coleta.
+
     Args:
         ni_ano: ano de 4 dígitos embutido no NI (ou None).
         data_coleta: a Data da Coleta (date/datetime) ou None/NaT.
+        prefixo: prefixo da amostra (para a regra de reclassificação).
+        numero_sequencial: número da amostra (para a regra de reclassificação).
 
     Returns:
         Ano-de-verdade (int) ou None.
     """
+    if (
+        prefixo is not None
+        and numero_sequencial is not None
+        and reclassificar_2026(prefixo, numero_sequencial, ni_ano)
+    ):
+        return _RECLASS_2026_NI_ANO
+
     ano_coleta = _ano_de(data_coleta)
     if ano_coleta is not None:
         return ano_coleta

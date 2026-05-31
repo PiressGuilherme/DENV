@@ -47,9 +47,11 @@ class TestContagens:
         assert r.amostras_unicas == 5506
 
     def test_por_ano(self, resultado_import):
+        # Após a reclassificação 2026 (73 amostras D, ni_ano=2026, nº 1–976,
+        # movidas de 2025 para 2026). Antes da regra: 3.488 / 2.018.
         r, _ = resultado_import
-        assert r.por_ano.get(2025) == 3488
-        assert r.por_ano.get(2026) == 2018
+        assert r.por_ano.get(2025) == 3415
+        assert r.por_ano.get(2026) == 2091
 
     def test_sem_anos_inesperados(self, resultado_import):
         r, _ = resultado_import
