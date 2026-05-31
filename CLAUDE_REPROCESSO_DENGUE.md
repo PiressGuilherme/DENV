@@ -153,6 +153,33 @@ CREATE TABLE eventos (
 Regra de etapas: o reprocesso é sequencial. A UI pode alertar (não bloquear) se alguém marcar
 `pcr_feito` sem `extraida`. Decisão suave — avisar, deixar passar.
 
+> **ATUALIZAÇÃO (decisão posterior do usuário — sobrepõe o parágrafo acima):** o avanço de
+> fase passou a ser **ESTRITO (bloquear)**. Não se pode marcar `extraida` sem `coletada`, nem
+> `pcr_feito` sem `extraida`; o banco (`db.avancar_fase`) recusa a transição. Desmarcar uma
+> etapa também limpa as etapas posteriores (`db.retroceder_fase`). A UI (`app.py`) é organizada
+> em **abas por fase** (Geral + Coletadas + Extraídas + PCR feito): a Geral mostra todas as
+> amostras com badge de fase e marca "Coletada" em lote; amostras que já têm status não
+> reentram no fluxo. Cada amostra cai em exatamente uma fase (partição derivada dos 3 booleanos).
+
+> **REJEIÇÃO (adição posterior do usuário):** além das 3 etapas, uma amostra pode ser
+> **rejeitada** — estado terminal alternativo para quando não há volume suficiente / a amostra
+> não foi encontrada, e portanto não será retirada do estoque para extração/PCR. Colunas novas:
+> `rejeitada` (0/1), `motivo_rejeicao`, `data_rejeicao` (migração leve via `ALTER TABLE` para
+> bancos existentes). Regras: **só se rejeita amostra PENDENTE**; **motivo obrigatório**
+> (`Volume Insuficiente` | `Não Encontrada`); rejeitada **não reentra** no fluxo; é possível
+> **reverter** (volta a Pendente). Há uma **aba "Rejeitadas"** após "PCR feito" e a partição de
+> fases passou a excluir rejeitadas das demais (`... AND rejeitada = 0`). Funções:
+> `db.rejeitar`, `db.reverter_rejeicao`.
+
+> **FILTROS (Fase 4):** painel global com busca por NI (substring), Ano, Município e Flags;
+> as métricas e todas as abas refletem o subconjunto filtrado. Lógica em `db.construir_filtro`
+> / `db.valores_distintos`.
+
+> **EXPORT (Fase 5):** botão "Exportar" por aba gera **xlsx/csv da visão atual** (fase + filtro +
+> ordenação canônica) via `src/export.py` e `ui.download`. Só colunas do reprocesso (NI, número,
+> ano, município, datas, fase, etapas Sim/Não, motivo de rejeição, flags, n_origem) — **nunca** as
+> colunas antigas. Cards de métrica agora mostram também o % do total por etapa.
+
 ---
 
 ## 5. Arquitetura de arquivos
@@ -238,24 +265,11 @@ persistindo. Nada de filtros ainda — só provar que edita e ordena certo.
 
 **Fase 5 — Lote + export + polish.** Ações em massa, export filtrado, ajuste visual.
 
-A cada fase: commit, e me mostrar o que mudou antes de avançar.
+A cada fase: e me mostrar o que mudou antes de avançar.
 
 ---
 
-## 9. PRIMEIRO PROMPT sugerido para o Claude Code
-
-> Leia `CLAUDE.md` inteiro. Estamos construindo um tracker local em NiceGUI + SQLite para
-> controle de reprocesso de amostras de dengue. Comece pela **Fase 0 e Fase 1**: monte o
-> scaffold do projeto, configure o ambiente com nicegui/pandas/openpyxl, e implemente
-> `src/parsing.py` com os testes em `tests/test_parsing.py`. Não avance para o importador
-> enquanto os testes de parsing e ordenação não passarem. A ordenação cronológica correta
-> (número como inteiro, ano da Data da Coleta como verdade) é o requisito mais crítico do
-> projeto — trate os casos de virada de ano e de ano impossível conforme a Seção 3. Ao
-> terminar, rode os testes e me mostre o resultado antes de seguir.
-
----
-
-## 10. Convenções para o Claude Code
+## 9. Convenções para o Claude Code
 
 - Idioma do código e docstrings: português ou inglês técnico, consistente. Mensagens de UI em
   **português (BR)**.
