@@ -40,6 +40,7 @@ _LABEL_FASE = {
     "coletada": "Coletada",
     "extraida": "Extraída",
     "pcr_feito": "PCR feito",
+    "rejeitada": "Rejeitada",
 }
 
 # Cor do badge por fase (classes Tailwind do NiceGUI/Quasar).
@@ -48,6 +49,7 @@ _COR_FASE = {
     "coletada": "blue",
     "extraida": "amber",
     "pcr_feito": "green",
+    "rejeitada": "red",
 }
 
 _ETAPA_LABEL = {"coletada": "Coletada", "extraida": "Extraída", "pcr_feito": "PCR feito"}
@@ -55,6 +57,8 @@ _ETAPA_LABEL = {"coletada": "Coletada", "extraida": "Extraída", "pcr_feito": "P
 
 def _fase_da_linha(r) -> str:
     """Deriva a fase de uma linha (espelha db.FASES; partição completa)."""
+    if r["rejeitada"]:
+        return "rejeitada"
     if r["pcr_feito"]:
         return "pcr_feito"
     if r["extraida"]:
@@ -70,6 +74,7 @@ _HEX_FASE = {
     "coletada": "#2196f3",
     "extraida": "#ff9800",
     "pcr_feito": "#4caf50",
+    "rejeitada": "#e53935",
 }
 
 
@@ -93,6 +98,7 @@ def _linha_para_dict(r) -> dict:
         "data_coleta": r["data_coleta"] or "",
         "caso": r["caso"] or "",
         "fase": _badge_html(fase),              # HTML (ver _COL_FASE_IDX em html_columns)
+        "motivo": r["motivo_rejeicao"] or "",
         "flags": r["flags"] or "",
         "n_origem": r["n_origem"],
     }
@@ -102,10 +108,10 @@ def _linha_para_dict(r) -> dict:
 _COL_FASE_IDX = 6
 
 
-def _colunas() -> list[dict]:
+def _colunas(com_motivo: bool = False) -> list[dict]:
     # Checkbox de seleção: configurado via rowSelection (API v33+), não por colDef.
     # Larguras explícitas (sem 'flex') para não conflitar com auto_size_columns.
-    return [
+    cols = [
         {"headerName": "NI", "field": "ni", "filter": True, "width": 120,
          "pinned": "left"},
         {"headerName": "Número", "field": "numero", "type": "numericColumn", "width": 110},
@@ -114,10 +120,16 @@ def _colunas() -> list[dict]:
         {"headerName": "Data Coleta", "field": "data_coleta", "width": 130},
         {"headerName": "Caso", "field": "caso", "width": 120},
         {"headerName": "Fase", "field": "fase", "width": 130},  # idx 6: html_columns
+    ]
+    if com_motivo:
+        cols.append({"headerName": "Motivo", "field": "motivo", "filter": True,
+                     "width": 180})
+    cols += [
         {"headerName": "Flags", "field": "flags", "filter": True, "width": 260},
         {"headerName": "Nº origem", "field": "n_origem", "type": "numericColumn",
          "width": 110},
     ]
+    return cols
 
 
 class FaseTab:
@@ -138,6 +150,13 @@ class FaseTab:
                     icon="arrow_forward",
                     on_click=lambda: self.app.avancar(self, etapa),
                 ).props("color=primary")
+            # Rejeitar: só na Geral (rejeita amostras pendentes).
+            if self.fase == "geral":
+                ui.button(
+                    "Rejeitar",
+                    icon="block",
+                    on_click=lambda: self.app.abrir_dialogo_rejeicao(self),
+                ).props("color=negative outline")
             # Retroceder: só nas abas de fase concreta (não na Geral nem Pendente).
             if self.fase in ("coletada", "extraida", "pcr_feito"):
                 ui.button(
@@ -145,12 +164,19 @@ class FaseTab:
                     icon="undo",
                     on_click=lambda: self.app.retroceder(self, self.fase),
                 ).props("color=negative outline")
+            # Reverter: só na aba Rejeitadas (volta a Pendente).
+            if self.fase == "rejeitada":
+                ui.button(
+                    "Reverter rejeição",
+                    icon="undo",
+                    on_click=lambda: self.app.reverter_rejeicao(self),
+                ).props("color=primary outline")
             ui.space()
             self.label_contagem = ui.label().classes("text-grey-7")
 
         dados = self._carregar_dados()
         self.grid = ui.aggrid({
-            "columnDefs": _colunas(),
+            "columnDefs": _colunas(com_motivo=(self.fase == "rejeitada")),
             # API de seleção do AG-Grid v33+ (checkboxSelection no colDef foi removido):
             "rowSelection": {
                 "mode": "multiRow",
@@ -166,13 +192,16 @@ class FaseTab:
         ).style("height: 65vh")
         self.label_contagem.text = f"{len(dados)} amostra(s)"
 
-    def where(self) -> Optional[str]:
-        if self.fase == "geral":
-            return None
-        return db.where_por_fase(self.fase)
+    def _where_params(self) -> tuple[Optional[str], list]:
+        """Combina a cláusula da fase com o filtro global da App."""
+        fase_where = None if self.fase == "geral" else db.where_por_fase(self.fase)
+        filtro_where, params = self.app.filtro_where_params()
+        where = db._combinar_where(fase_where, filtro_where)
+        return where, params
 
     def _carregar_dados(self) -> list[dict]:
-        rows = db.listar_amostras(self.app.con, where=self.where())
+        where, params = self._where_params()
+        rows = db.listar_amostras(self.app.con, where=where, params=params)
         return [_linha_para_dict(r) for r in rows]
 
     def recarregar(self) -> None:
@@ -187,6 +216,22 @@ class App:
         self.con = db.init_db(db_path) if db_path else db.init_db()
         self.tabs: dict[str, FaseTab] = {}
         self._cards: dict[str, ui.label] = {}
+        # Estado dos filtros globais (compartilhado por todas as abas).
+        self.f_ano: Optional[int] = None
+        self.f_municipio: Optional[str] = None
+        self.f_busca_ni: str = ""
+        self.f_flags: list[str] = []        # flags específicas (qualquer uma)
+        self.f_com_flags: Optional[bool] = None  # True/False/None
+
+    def filtro_where_params(self) -> tuple[Optional[str], list]:
+        """(where, params) do filtro global corrente (sem a cláusula de fase)."""
+        return db.construir_filtro(
+            ano=self.f_ano,
+            municipio=self.f_municipio,
+            busca_ni=self.f_busca_ni or None,
+            flags_qualquer=self.f_flags or None,
+            com_flags=self.f_com_flags,
+        )
 
     # -- helpers de seleção/ação ------------------------------------------- #
     async def _chaves_selecionadas(self, tab: FaseTab) -> list[str]:
@@ -227,12 +272,66 @@ class App:
         ui.notify(f"{n} amostra(s) retrocedida(s) de {_LABEL_FASE[etapa]}.", type="positive")
         self.refresh()
 
+    async def abrir_dialogo_rejeicao(self, tab: FaseTab) -> None:
+        """Abre diálogo para escolher o motivo e rejeitar a seleção (só pendentes)."""
+        chaves = await self._chaves_selecionadas(tab)
+        if not chaves:
+            ui.notify("Selecione ao menos uma amostra.", type="warning")
+            return
+
+        with ui.dialog() as dialogo, ui.card():
+            ui.label(f"Rejeitar {len(chaves)} amostra(s)").classes("text-bold")
+            ui.label("Escolha o motivo da rejeição:").classes("text-grey-7")
+            motivo_sel = ui.select(
+                list(db.MOTIVOS_REJEICAO), label="Motivo",
+                value=db.MOTIVOS_REJEICAO[0],
+            ).props("dense").classes("w-64")
+            with ui.row().classes("w-full justify-end gap-2"):
+                ui.button("Cancelar", on_click=dialogo.close).props("flat")
+                ui.button(
+                    "Confirmar rejeição", icon="block",
+                    on_click=lambda: self._confirmar_rejeicao(
+                        dialogo, chaves, motivo_sel.value
+                    ),
+                ).props("color=negative")
+        dialogo.open()
+
+    def _confirmar_rejeicao(self, dialogo, chaves: list[str], motivo: str) -> None:
+        if not motivo:
+            ui.notify("Selecione um motivo.", type="warning")
+            return
+        try:
+            n = db.rejeitar(self.con, chaves, motivo)
+        except db.TransicaoInvalida as e:
+            ui.notify(str(e), type="negative")
+            return
+        except ValueError as e:
+            ui.notify(str(e), type="negative")
+            return
+        dialogo.close()
+        ui.notify(f"{n} amostra(s) rejeitada(s) — {motivo}.", type="positive")
+        self.refresh()
+
+    async def reverter_rejeicao(self, tab: FaseTab) -> None:
+        chaves = await self._chaves_selecionadas(tab)
+        if not chaves:
+            ui.notify("Selecione ao menos uma amostra.", type="warning")
+            return
+        n = db.reverter_rejeicao(self.con, chaves)
+        ui.notify(f"{n} amostra(s) devolvida(s) a Pendente.", type="positive")
+        self.refresh()
+
     def _filtrar_nao_coletadas(self, chaves: list[str]) -> tuple[list[str], int]:
+        """Elegíveis para coletar = pendentes (não coletadas E não rejeitadas).
+
+        Amostras já no fluxo OU rejeitadas não reentram (decisão do usuário).
+        """
         ph = ",".join("?" * len(chaves))
         ja = {
             row[0]
             for row in self.con.execute(
-                f"SELECT chave FROM amostras WHERE chave IN ({ph}) AND coletada = 1",
+                f"SELECT chave FROM amostras WHERE chave IN ({ph}) "
+                f"AND (coletada = 1 OR rejeitada = 1)",
                 chaves,
             ).fetchall()
         }
@@ -243,11 +342,63 @@ class App:
     def refresh(self) -> None:
         for tab in self.tabs.values():
             tab.recarregar()
-        cont = db.contagens_por_fase(self.con)
+        # Métricas refletem o subconjunto sob os filtros correntes (Fase 4).
+        where, params = self.filtro_where_params()
+        cont = db.contagens_por_fase(self.con, where=where, params=params)
         self._cards["total"].text = str(cont["total"])
         self._cards["coletada"].text = str(cont["coletada"])
         self._cards["extraida"].text = str(cont["extraida"])
         self._cards["pcr_feito"].text = str(cont["pcr_feito"])
+        self._cards["rejeitada"].text = str(cont["rejeitada"])
+
+    def aplicar_filtros(self) -> None:
+        """Lê os controles, atualiza o estado e recarrega tudo."""
+        self.f_ano = self._ctl_ano.value or None
+        self.f_municipio = self._ctl_municipio.value or None
+        self.f_busca_ni = (self._ctl_busca.value or "").strip()
+        flags = list(self._ctl_flags.value or [])
+        self.f_flags = flags
+        self.refresh()
+
+    def limpar_filtros(self) -> None:
+        self._ctl_ano.value = None
+        self._ctl_municipio.value = None
+        self._ctl_busca.value = ""
+        self._ctl_flags.value = []
+        self.aplicar_filtros()
+
+    def _montar_filtros(self) -> None:
+        """Painel de filtros globais (Fase 4): ano, município, busca NI, flags."""
+        anos = db.valores_distintos(self.con, "ano_verdade")
+        municipios = db.valores_distintos(self.con, "municipio")
+        # Flags disponíveis nos dados (para o multi-select).
+        flags_disp = sorted({
+            t for (f,) in self.con.execute(
+                "SELECT DISTINCT flags FROM amostras WHERE flags != ''"
+            ).fetchall() for t in f.split(";") if t
+        })
+
+        with ui.card().classes("w-full q-mb-md"):
+            with ui.row().classes("w-full items-end gap-3"):
+                self._ctl_busca = ui.input(
+                    "Buscar NI", placeholder="ex.: D1264"
+                ).props("clearable dense").classes("w-40").on(
+                    "keydown.enter", lambda: self.aplicar_filtros()
+                )
+                self._ctl_ano = ui.select(
+                    {a: str(a) for a in anos}, label="Ano", clearable=True
+                ).props("dense").classes("w-32")
+                self._ctl_municipio = ui.select(
+                    municipios, label="Município", clearable=True, with_input=True
+                ).props("dense").classes("w-64")
+                self._ctl_flags = ui.select(
+                    flags_disp, label="Flags", multiple=True, clearable=True
+                ).props("dense use-chips").classes("w-72")
+
+                ui.button("Filtrar", icon="filter_alt",
+                          on_click=lambda: self.aplicar_filtros()).props("color=primary")
+                ui.button("Limpar", icon="clear",
+                          on_click=lambda: self.limpar_filtros()).props("flat")
 
     def _card(self, titulo: str, chave: str, cor: str) -> None:
         with ui.card().classes("items-center").style(f"border-top: 4px solid {cor}"):
@@ -262,12 +413,16 @@ class App:
             self._card("Coletadas", "coletada", "#2196f3")
             self._card("Extraídas", "extraida", "#ff9800")
             self._card("PCR feito", "pcr_feito", "#4caf50")
+            self._card("Rejeitadas", "rejeitada", "#e53935")
+
+        self._montar_filtros()
 
         with ui.tabs().classes("w-full") as tabs:
             t_geral = ui.tab("Geral")
             t_col = ui.tab("Coletadas")
             t_ext = ui.tab("Extraídas")
             t_pcr = ui.tab("PCR feito")
+            t_rej = ui.tab("Rejeitadas")
 
         with ui.tab_panels(tabs, value=t_geral).classes("w-full"):
             with ui.tab_panel(t_geral):
@@ -278,6 +433,8 @@ class App:
                 self.tabs["extraida"] = FaseTab(self, "extraida")
             with ui.tab_panel(t_pcr):
                 self.tabs["pcr_feito"] = FaseTab(self, "pcr_feito")
+            with ui.tab_panel(t_rej):
+                self.tabs["rejeitada"] = FaseTab(self, "rejeitada")
 
         self.refresh()
         if db.contar(self.con) == 0:

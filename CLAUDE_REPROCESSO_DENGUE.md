@@ -161,6 +161,20 @@ Regra de etapas: o reprocesso é sequencial. A UI pode alertar (não bloquear) s
 > amostras com badge de fase e marca "Coletada" em lote; amostras que já têm status não
 > reentram no fluxo. Cada amostra cai em exatamente uma fase (partição derivada dos 3 booleanos).
 
+> **REJEIÇÃO (adição posterior do usuário):** além das 3 etapas, uma amostra pode ser
+> **rejeitada** — estado terminal alternativo para quando não há volume suficiente / a amostra
+> não foi encontrada, e portanto não será retirada do estoque para extração/PCR. Colunas novas:
+> `rejeitada` (0/1), `motivo_rejeicao`, `data_rejeicao` (migração leve via `ALTER TABLE` para
+> bancos existentes). Regras: **só se rejeita amostra PENDENTE**; **motivo obrigatório**
+> (`Volume Insuficiente` | `Não Encontrada`); rejeitada **não reentra** no fluxo; é possível
+> **reverter** (volta a Pendente). Há uma **aba "Rejeitadas"** após "PCR feito" e a partição de
+> fases passou a excluir rejeitadas das demais (`... AND rejeitada = 0`). Funções:
+> `db.rejeitar`, `db.reverter_rejeicao`.
+
+> **FILTROS (Fase 4):** painel global com busca por NI (substring), Ano, Município e Flags;
+> as métricas e todas as abas refletem o subconjunto filtrado. Lógica em `db.construir_filtro`
+> / `db.valores_distintos`.
+
 ---
 
 ## 5. Arquitetura de arquivos

@@ -24,6 +24,9 @@ CAMPOS_REPROCESSO = (
     "data_extraida",
     "data_pcr",
     "obs_reprocesso",
+    "rejeitada",
+    "motivo_rejeicao",
+    "data_rejeicao",
 )
 
 # Campos descritivos atualizáveis a cada reimport (vêm da planilha de origem).
@@ -65,6 +68,11 @@ CREATE TABLE IF NOT EXISTS amostras (
     data_pcr            TIMESTAMP,
     obs_reprocesso      TEXT,
 
+    -- REJEIÇÃO (estado terminal alternativo: amostra não entra no fluxo)
+    rejeitada           INTEGER NOT NULL DEFAULT 0,
+    motivo_rejeicao     TEXT,
+    data_rejeicao       TIMESTAMP,
+
     -- METADADOS / AUDITORIA
     n_origem            INTEGER NOT NULL DEFAULT 1,
     flags               TEXT DEFAULT '',
@@ -97,9 +105,28 @@ def conectar(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
     return con
 
 
+# Colunas adicionadas após a 1ª versão do schema. Migração leve para bancos
+# já existentes (CREATE TABLE IF NOT EXISTS não altera tabelas antigas).
+_COLUNAS_MIGRACAO = {
+    "rejeitada": "INTEGER NOT NULL DEFAULT 0",
+    "motivo_rejeicao": "TEXT",
+    "data_rejeicao": "TIMESTAMP",
+}
+
+
+def _migrar(con: sqlite3.Connection) -> None:
+    """Adiciona colunas novas a bancos pré-existentes (idempotente)."""
+    existentes = {row[1] for row in con.execute("PRAGMA table_info(amostras)").fetchall()}
+    for coluna, tipo in _COLUNAS_MIGRACAO.items():
+        if coluna not in existentes:
+            con.execute(f"ALTER TABLE amostras ADD COLUMN {coluna} {tipo}")
+    con.commit()
+
+
 def criar_schema(con: sqlite3.Connection) -> None:
-    """Cria tabelas e índices (idempotente — usa IF NOT EXISTS)."""
+    """Cria tabelas e índices (idempotente — usa IF NOT EXISTS) e migra colunas."""
     con.executescript(_SCHEMA)
+    _migrar(con)
     con.commit()
 
 
@@ -175,12 +202,18 @@ _PREREQUISITO = {
     "pcr_feito": "extraida",
 }
 
+# Motivos válidos de rejeição (decisão do usuário).
+MOTIVOS_REJEICAO = ("Volume Insuficiente", "Não Encontrada")
+
 # Mapa fase->cláusula WHERE. Cada amostra cai em exatamente uma (partição completa).
+# Rejeitada é um estado terminal alternativo: amostras rejeitadas saem das demais
+# fases (todas as fases do fluxo exigem rejeitada = 0).
 FASES: dict[str, str] = {
-    "pendente": "coletada = 0",
-    "coletada": "coletada = 1 AND extraida = 0",
-    "extraida": "extraida = 1 AND pcr_feito = 0",
-    "pcr_feito": "pcr_feito = 1",
+    "pendente": "coletada = 0 AND rejeitada = 0",
+    "coletada": "coletada = 1 AND extraida = 0 AND rejeitada = 0",
+    "extraida": "extraida = 1 AND pcr_feito = 0 AND rejeitada = 0",
+    "pcr_feito": "pcr_feito = 1 AND rejeitada = 0",
+    "rejeitada": "rejeitada = 1",
 }
 
 
@@ -299,8 +332,168 @@ def retroceder_fase(
     return alteradas
 
 
-def contagens_por_fase(con: sqlite3.Connection) -> dict[str, int]:
-    """Contadores de cada fase + total (para o cabeçalho de métricas da UI)."""
-    out = {fase: contar(con, where=clausula) for fase, clausula in FASES.items()}
-    out["total"] = contar(con)
+def rejeitar(
+    con: sqlite3.Connection,
+    chaves: Iterable[str],
+    motivo: str,
+) -> int:
+    """Rejeita amostras em lote (estado terminal alternativo).
+
+    Decisão do usuário: só é possível rejeitar amostras que ainda estão
+    PENDENTES (não coletadas e não já rejeitadas). Se alguma chave do lote não
+    estiver pendente, recusa o lote inteiro (TransicaoInvalida, atômico). O
+    motivo é obrigatório e deve ser um de MOTIVOS_REJEICAO.
+
+    Returns:
+        Número de amostras efetivamente rejeitadas.
+    """
+    if motivo not in MOTIVOS_REJEICAO:
+        raise ValueError(f"motivo inválido: {motivo!r} (use {list(MOTIVOS_REJEICAO)})")
+    chaves = list(dict.fromkeys(chaves))
+    if not chaves:
+        return 0
+
+    ph = _placeholders(len(chaves))
+    # Pré-requisito: todas pendentes (coletada=0 AND rejeitada=0).
+    inelegiveis = con.execute(
+        f"SELECT COUNT(*) FROM amostras "
+        f"WHERE chave IN ({ph}) AND NOT (coletada = 0 AND rejeitada = 0)",
+        chaves,
+    ).fetchone()[0]
+    if inelegiveis:
+        raise TransicaoInvalida(
+            f"{inelegiveis} amostra(s) não estão pendentes — só é possível "
+            f"rejeitar amostras pendentes."
+        )
+
+    cur = con.execute(
+        f"UPDATE amostras "
+        f"SET rejeitada = 1, motivo_rejeicao = ?, "
+        f"    data_rejeicao = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP "
+        f"WHERE chave IN ({ph}) AND rejeitada = 0",
+        [motivo, *chaves],
+    )
+    alteradas = cur.rowcount
+    for chave in chaves:
+        registrar_evento(con, chave, "rejeitada", motivo)
+    con.commit()
+    return alteradas
+
+
+def reverter_rejeicao(con: sqlite3.Connection, chaves: Iterable[str]) -> int:
+    """Desfaz a rejeição em lote: a amostra volta a Pendente.
+
+    Limpa rejeitada/motivo/data e grava evento. Returns: nº de alteradas.
+    """
+    chaves = list(dict.fromkeys(chaves))
+    if not chaves:
+        return 0
+    ph = _placeholders(len(chaves))
+    cur = con.execute(
+        f"UPDATE amostras "
+        f"SET rejeitada = 0, motivo_rejeicao = NULL, data_rejeicao = NULL, "
+        f"    atualizado_em = CURRENT_TIMESTAMP "
+        f"WHERE chave IN ({ph}) AND rejeitada = 1",
+        chaves,
+    )
+    alteradas = cur.rowcount
+    for chave in chaves:
+        registrar_evento(con, chave, "rejeitada", "0")
+    con.commit()
+    return alteradas
+
+
+def contagens_por_fase(con: sqlite3.Connection, where: Optional[str] = None,
+                       params: Iterable = ()) -> dict[str, int]:
+    """Contadores de cada fase + total, opcionalmente sobre um subconjunto filtrado.
+
+    Combinando o WHERE do filtro com a cláusula de cada fase, os cards de métrica
+    podem refletir só as amostras visíveis sob os filtros correntes (Fase 4).
+    """
+    params = tuple(params)
+    out = {}
+    for fase, clausula in FASES.items():
+        w = _combinar_where(where, clausula)
+        out[fase] = contar(con, where=w, params=params)
+    out["total"] = contar(con, where=where, params=params)
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Filtros da UI (Fase 4): ano, município, busca por NI, presença de flags      #
+# --------------------------------------------------------------------------- #
+
+def _combinar_where(*clausulas: Optional[str]) -> Optional[str]:
+    """Junta cláusulas WHERE não-vazias com AND (cada uma entre parênteses)."""
+    partes = [f"({c})" for c in clausulas if c]
+    return " AND ".join(partes) if partes else None
+
+
+def valores_distintos(con: sqlite3.Connection, coluna: str) -> list:
+    """Valores distintos não-nulos de uma coluna, ordenados (para dropdowns).
+
+    Só aceita colunas conhecidas (evita SQL injection via nome de coluna).
+    """
+    permitidas = {"ano_verdade", "municipio", "caso", "prefixo"}
+    if coluna not in permitidas:
+        raise ValueError(f"coluna não permitida para distinct: {coluna!r}")
+    rows = con.execute(
+        f"SELECT DISTINCT {coluna} FROM amostras "
+        f"WHERE {coluna} IS NOT NULL AND {coluna} != '' ORDER BY {coluna}"
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+def construir_filtro(
+    *,
+    ano: Optional[int] = None,
+    municipio: Optional[str] = None,
+    busca_ni: Optional[str] = None,
+    flags_qualquer: Optional[Iterable[str]] = None,
+    com_flags: Optional[bool] = None,
+) -> tuple[Optional[str], list]:
+    """Monta (where, params) a partir dos filtros da UI.
+
+    Args:
+        ano: filtra por ano_verdade exato.
+        municipio: filtra por município exato.
+        busca_ni: substring case-insensitive no NI original (ou na chave).
+        flags_qualquer: lista de flags; casa amostras que tenham QUALQUER uma.
+        com_flags: True = só amostras com alguma flag; False = só sem flag;
+                   None = não filtra por presença.
+
+    Returns:
+        (where, params) prontos para listar_amostras/contar. where=None se vazio.
+    """
+    clausulas: list[str] = []
+    params: list = []
+
+    if ano is not None:
+        clausulas.append("ano_verdade = ?")
+        params.append(ano)
+
+    if municipio:
+        clausulas.append("municipio = ?")
+        params.append(municipio)
+
+    if busca_ni:
+        # Busca no NI como veio e também na chave (cobre prefixo/ano formatado).
+        clausulas.append("(ni_original LIKE ? OR chave LIKE ?)")
+        termo = f"%{busca_ni.strip()}%"
+        params.extend([termo, termo])
+
+    if flags_qualquer:
+        ors = []
+        for f in flags_qualquer:
+            ors.append("flags LIKE ?")
+            params.append(f"%{f}%")
+        if ors:
+            clausulas.append("(" + " OR ".join(ors) + ")")
+
+    if com_flags is True:
+        clausulas.append("flags != ''")
+    elif com_flags is False:
+        clausulas.append("flags = ''")
+
+    where = " AND ".join(clausulas) if clausulas else None
+    return where, params
