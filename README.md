@@ -56,17 +56,23 @@ pip install -r requirements.txt
 
 ## Uso
 
-Com o ambiente virtual ativado:
+O banco **`reprocesso.db` já vem versionado no repositório** (repo privado, sem dados
+sensíveis), então em uma máquina nova ele chega pronto pelo `git clone` — **não precisa
+rodar o importer**. Basta subir a aplicação:
 
 ```bash
-# 1. Popular o banco a partir da planilha (gera reprocesso.db)
-python -m src.importer
-
-# 2. Subir a aplicação
 python -m src.app
 ```
 
 Acesse no navegador: **http://localhost:8080**
+
+### Repopular / atualizar o banco a partir da planilha (opcional)
+
+Só é necessário se você **substituir a planilha** em `data/` por uma versão nova:
+
+```bash
+python -m src.importer
+```
 
 O importador é **idempotente**: reexecutá-lo atualiza os campos descritivos da planilha
 mas **preserva todo o progresso** de reprocesso/rejeição já registrado. Ao final ele
@@ -77,6 +83,37 @@ imprime contagens de sanidade (≈ 5.506 amostras únicas: 3.415 de 2025, 2.091 
 ```bash
 pytest -q
 ```
+
+---
+
+## Migrar para outra máquina (mantendo o progresso)
+
+Como o `reprocesso.db` é versionado, o progresso (coletada/extraída/PCR/rejeição) viaja
+junto com o git. Na máquina nova:
+
+```bash
+git clone https://github.com/PiressGuilherme/DENV.git
+cd DENV
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python -m src.app          # o banco já vem com o clone — nada de importer
+```
+
+Para **propagar marcações** de uma máquina para outra depois:
+
+```bash
+# na máquina onde você marcou amostras:
+git add reprocesso.db && git commit -m "progresso de bancada" && git push
+
+# na outra máquina:
+git pull
+```
+
+> ⚠️ **Use uma máquina principal por vez.** O `reprocesso.db` é um arquivo binário: se você
+> marcar amostras em **duas máquinas** sem dar `git pull`/`push` entre elas, o git acusa
+> conflito no binário — que **não tem merge automático** e obrigaria a escolher um dos dois
+> bancos, perdendo o progresso do outro. Para uso simultâneo de verdade, o caminho seria
+> rodar a app num servidor único e os demais acessarem por `http://<ip>:8080`.
 
 ---
 
@@ -93,11 +130,13 @@ DENV/
 │   └── app.py           # UI NiceGUI (abas por fase, filtros, lote, export)
 ├── tests/               # pytest
 ├── requirements.txt
-└── reprocesso.db        # gerado pelo importer (não versionado)
+└── reprocesso.db        # banco SQLite — versionado (carrega o progresso)
 ```
 
-`reprocesso.db` e `.venv/` são ignorados pelo git (ver [`.gitignore`](.gitignore)). A
-planilha de origem é read-only e nunca é sobrescrita pela aplicação.
+`reprocesso.db` **é versionado** (carrega o progresso entre máquinas); só os arquivos
+transientes do SQLite (`-journal`/`-wal`/`-shm`) e o `.venv/` são ignorados pelo git
+(ver [`.gitignore`](.gitignore)). A planilha de origem é read-only e nunca é sobrescrita
+pela aplicação.
 
 ---
 

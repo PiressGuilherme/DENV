@@ -1,5 +1,6 @@
-# Banco gerado — nunca versionar
-reprocesso.db
+# O banco reprocesso.db É versionado (repo privado, sem dados sensíveis) para
+# carregar o progresso entre máquinas. Apenas os arquivos transientes do SQLite
+# (journal/WAL) são ignorados.
 reprocesso.db-journal
 reprocesso.db-wal
 reprocesso.db-shm
