@@ -19,11 +19,12 @@ Uso:
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
 
 from nicegui import ui
 
-from src import db
+from src import db, export
 
 # Etapa "alvo" de cada aba (o botão de avanço marca esta etapa).
 # Geral marca 'coletada'; cada aba de fase marca a PRÓXIMA etapa.
@@ -172,7 +173,14 @@ class FaseTab:
                     on_click=lambda: self.app.reverter_rejeicao(self),
                 ).props("color=primary outline")
             ui.space()
-            self.label_contagem = ui.label().classes("text-grey-7")
+            self.label_contagem = ui.label().classes("text-grey-7 q-mr-md")
+            # Export da visão atual (respeita filtro + fase + ordenação corrente).
+            with ui.button("Exportar", icon="download").props("color=secondary outline"):
+                with ui.menu():
+                    ui.menu_item("Excel (.xlsx)",
+                                 on_click=lambda: self.app.exportar(self, "xlsx"))
+                    ui.menu_item("CSV (.csv)",
+                                 on_click=lambda: self.app.exportar(self, "csv"))
 
         dados = self._carregar_dados()
         self.grid = ui.aggrid({
@@ -338,6 +346,28 @@ class App:
         elegiveis = [c for c in chaves if c not in ja]
         return elegiveis, len(ja)
 
+    # -- export ------------------------------------------------------------ #
+    def exportar(self, tab: FaseTab, formato: str) -> None:
+        """Exporta a visão da aba (filtro + fase + ordenação) em xlsx/csv."""
+        where, params = tab._where_params()
+        rows = db.listar_amostras(self.con, where=where, params=params)
+        if not rows:
+            ui.notify("Nada para exportar na visão atual.", type="warning")
+            return
+
+        nome_aba = "geral" if tab.fase == "geral" else tab.fase
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        if formato == "xlsx":
+            conteudo = export.para_xlsx_bytes(rows, sheet_name=nome_aba)
+            fname = f"reprocesso_{nome_aba}_{ts}.xlsx"
+            media = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        else:
+            conteudo = export.para_csv_bytes(rows)
+            fname = f"reprocesso_{nome_aba}_{ts}.csv"
+            media = "text/csv"
+        ui.download(conteudo, fname, media)
+        ui.notify(f"Exportando {len(rows)} amostra(s) — {fname}", type="positive")
+
     # -- render ------------------------------------------------------------ #
     def refresh(self) -> None:
         for tab in self.tabs.values():
@@ -345,11 +375,12 @@ class App:
         # Métricas refletem o subconjunto sob os filtros correntes (Fase 4).
         where, params = self.filtro_where_params()
         cont = db.contagens_por_fase(self.con, where=where, params=params)
-        self._cards["total"].text = str(cont["total"])
-        self._cards["coletada"].text = str(cont["coletada"])
-        self._cards["extraida"].text = str(cont["extraida"])
-        self._cards["pcr_feito"].text = str(cont["pcr_feito"])
-        self._cards["rejeitada"].text = str(cont["rejeitada"])
+        total = cont["total"]
+        self._cards["total"].text = str(total)
+        for chave in ("coletada", "extraida", "pcr_feito", "rejeitada"):
+            self._cards[chave].text = str(cont[chave])
+            pct = (cont[chave] / total * 100) if total else 0
+            self._cards[f"{chave}_pct"].text = f"{pct:.0f}% do total"
 
     def aplicar_filtros(self) -> None:
         """Lê os controles, atualiza o estado e recarrega tudo."""
@@ -400,20 +431,24 @@ class App:
                 ui.button("Limpar", icon="clear",
                           on_click=lambda: self.limpar_filtros()).props("flat")
 
-    def _card(self, titulo: str, chave: str, cor: str) -> None:
+    def _card(self, titulo: str, chave: str, cor: str, com_pct: bool = False) -> None:
         with ui.card().classes("items-center").style(f"border-top: 4px solid {cor}"):
             self._cards[chave] = ui.label("0").classes("text-2xl text-bold")
             ui.label(titulo).classes("text-grey-7 text-sm")
+            if com_pct:
+                self._cards[f"{chave}_pct"] = ui.label("").classes("text-grey-6 text-xs")
 
     def construir(self) -> None:
-        ui.label("Reprocesso Dengue — LACEN-RS").classes("text-h5 q-mb-sm")
+        with ui.row().classes("items-baseline gap-2 q-mb-sm"):
+            ui.label("Reprocesso Dengue — LACEN-RS").classes("text-h5")
+            ui.label("controle de coleta · extração · PCR").classes("text-grey-6 text-sm")
 
         with ui.row().classes("gap-4 q-mb-md"):
             self._card("Total", "total", "#607d8b")
-            self._card("Coletadas", "coletada", "#2196f3")
-            self._card("Extraídas", "extraida", "#ff9800")
-            self._card("PCR feito", "pcr_feito", "#4caf50")
-            self._card("Rejeitadas", "rejeitada", "#e53935")
+            self._card("Coletadas", "coletada", "#2196f3", com_pct=True)
+            self._card("Extraídas", "extraida", "#ff9800", com_pct=True)
+            self._card("PCR feito", "pcr_feito", "#4caf50", com_pct=True)
+            self._card("Rejeitadas", "rejeitada", "#e53935", com_pct=True)
 
         self._montar_filtros()
 

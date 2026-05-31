@@ -175,6 +175,11 @@ Regra de etapas: o reprocesso é sequencial. A UI pode alertar (não bloquear) s
 > as métricas e todas as abas refletem o subconjunto filtrado. Lógica em `db.construir_filtro`
 > / `db.valores_distintos`.
 
+> **EXPORT (Fase 5):** botão "Exportar" por aba gera **xlsx/csv da visão atual** (fase + filtro +
+> ordenação canônica) via `src/export.py` e `ui.download`. Só colunas do reprocesso (NI, número,
+> ano, município, datas, fase, etapas Sim/Não, motivo de rejeição, flags, n_origem) — **nunca** as
+> colunas antigas. Cards de métrica agora mostram também o % do total por etapa.
+
 ---
 
 ## 5. Arquitetura de arquivos
