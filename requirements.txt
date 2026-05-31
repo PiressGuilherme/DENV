@@ -1,0 +1,21 @@
+# Dependências de runtime + desenvolvimento do tracker de reprocesso de dengue.
+# Setup em outra máquina:
+#
+#   python -m venv .venv
+#   # Windows (PowerShell):  .venv\Scripts\Activate.ps1
+#   # Linux/macOS:           source .venv/bin/activate
+#   pip install -r requirements.txt
+#
+# Depois: rodar testes e import:
+#   pytest -v
+#   python -m src.importer        # gera reprocesso.db a partir de data/*.xlsx
+#
+# Versões fixadas com as testadas neste ambiente (Python 3.14).
+
+# --- Runtime ---
+nicegui==3.12.1
+pandas==3.0.3
+openpyxl==3.1.5
+
+# --- Desenvolvimento / testes ---
+pytest==9.0.3

@@ -1,0 +1,17 @@
+# Banco gerado — nunca versionar
+reprocesso.db
+reprocesso.db-journal
+reprocesso.db-wal
+reprocesso.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Exports gerados pela UI
+exports/
+*.tmp.xlsx
