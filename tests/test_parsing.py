@@ -25,6 +25,7 @@ from src.parsing import (
     montar_chave,
     parse_ni,
     ano_verdade,
+    reclassificar_2026,
 )
 
 
@@ -147,11 +148,29 @@ class TestAnoVerdade:
 # Flags (Seção 3.4)                                                            #
 # --------------------------------------------------------------------------- #
 class TestFlags:
-    def test_d001_26_coletada_em_2025_recebe_diverge(self):
-        """Virada de ano legítima: D001/26 coletada em 30/12/2025."""
+    def test_d001_26_reclassificada_para_2026_sem_flag(self):
+        """Reclassificação 2026: D001/26 coletada em 30/12/2025 vira 2026 e NÃO
+        recebe ANO_NI_DIVERGE (decisão posterior do usuário). Antes da regra,
+        ficava em 2025 com a flag."""
         r = parse_ni("D001/26")
         coleta = datetime(2025, 12, 30)
-        av = ano_verdade(r.ni_ano, coleta)
+        av = ano_verdade(
+            r.ni_ano, coleta, prefixo=r.prefixo, numero_sequencial=r.numero_sequencial
+        )
+        assert av == 2026
+        flags = calcular_flags(
+            ni_ano=r.ni_ano, ano_verdade_=av, data_coleta=coleta, data_sintomas=None
+        )
+        assert FLAG_ANO_NI_DIVERGE not in flags
+
+    def test_diverge_quando_regra_nao_aplica(self):
+        """Fora do range da reclassificação (nº > 976), a virada de ano continua
+        sinalizada: D977/26 coletada em 2025 fica 2025 + ANO_NI_DIVERGE."""
+        r = parse_ni("D977/26")
+        coleta = datetime(2025, 12, 30)
+        av = ano_verdade(
+            r.ni_ano, coleta, prefixo=r.prefixo, numero_sequencial=r.numero_sequencial
+        )
         assert av == 2025
         flags = calcular_flags(
             ni_ano=r.ni_ano, ano_verdade_=av, data_coleta=coleta, data_sintomas=None
@@ -222,3 +241,40 @@ class TestMontarChave:
     ])
     def test_montar_chave(self, prefixo, num, ano, esperado):
         assert montar_chave(prefixo, num, ano) == esperado
+
+
+# --------------------------------------------------------------------------- #
+# Reclassificação 2026 (decisão posterior do usuário)                          #
+# --------------------------------------------------------------------------- #
+class TestReclassificacao2026:
+    @pytest.mark.parametrize("prefixo,num,ni_ano,esperado", [
+        ("D", 1, 2026, True),       # limite inferior
+        ("D", 976, 2026, True),     # limite superior
+        ("D", 500, 2026, True),     # meio
+        ("D", 977, 2026, False),    # fora do range (acima)
+        ("D", 0, 2026, False),      # fora do range (abaixo)
+        ("D", 1, 2025, False),      # ni_ano não é 2026
+        ("SR", 1, 2026, False),     # prefixo não é D
+        ("D", 1, None, False),      # sem ni_ano
+    ])
+    def test_predicado(self, prefixo, num, ni_ano, esperado):
+        assert reclassificar_2026(prefixo, num, ni_ano) is esperado
+
+    def test_ano_verdade_forca_2026_no_grupo(self):
+        # coleta em 2025, mas a regra força 2026
+        assert ano_verdade(2026, datetime(2025, 12, 30), prefixo="D",
+                           numero_sequencial=5) == 2026
+
+    def test_ano_verdade_sem_args_mantem_regra_antiga(self):
+        # sem prefixo/numero, a Data da Coleta vence (compatibilidade)
+        assert ano_verdade(2026, datetime(2025, 12, 30)) == 2025
+
+    def test_chave_reflete_2026(self):
+        av = ano_verdade(2026, datetime(2025, 12, 30), prefixo="D", numero_sequencial=1)
+        assert montar_chave("D", 1, av) == "D1/26"
+
+    def test_ordena_apos_2025(self):
+        """Reclassificada (2026) ordena depois de uma 2025 de número maior."""
+        k_2025 = chave_ordenacao("D", 5000, 2025)
+        k_reclass = chave_ordenacao("D", 1, 2026)
+        assert k_2025 < k_reclass
