@@ -362,9 +362,9 @@ class App:
 
         Amostras já no fluxo OU rejeitadas não reentram (decisão do usuário).
         """
-        ph = ",".join("?" * len(chaves))
+        ph = db._placeholders(len(chaves))
         ja = {
-            row[0]
+            row["chave"]
             for row in self.con.execute(
                 f"SELECT chave FROM amostras WHERE chave IN ({ph}) "
                 f"AND (coletada = 1 OR rejeitada = 1)",
@@ -432,9 +432,10 @@ class App:
         municipios = db.valores_distintos(self.con, "municipio")
         # Flags disponíveis nos dados (para o multi-select).
         flags_disp = sorted({
-            t for (f,) in self.con.execute(
+            t for r in self.con.execute(
                 "SELECT DISTINCT flags FROM amostras WHERE flags != ''"
-            ).fetchall() for t in f.split(";") if t
+            ).fetchall()
+            for t in r["flags"].split(";") if t
         })
 
         with ui.card().classes("w-full q-mb-md"):
