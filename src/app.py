@@ -20,12 +20,36 @@ Uso:
 from __future__ import annotations
 
 import os
+import threading
 from datetime import datetime
 from typing import Optional
 
+from nicegui import app as _nicegui_app
 from nicegui import ui
 
 from src import auth, db, export
+
+
+def _primeiro_boot() -> None:
+    """Popula o banco na primeira execução em produção (roda em thread separada)."""
+    if not db._DATABASE_URL:
+        return
+    try:
+        con = db.conectar()
+        n = db.contar(con)
+        con.close()
+    except Exception:
+        n = 0
+    if n == 0:
+        print("[startup] Banco vazio — importando dados do xlsx...", flush=True)
+        from src.importer import importar
+        importar(verificar_sanidade=False)
+        print("[startup] Import concluído.", flush=True)
+
+
+_nicegui_app.on_startup(
+    lambda: threading.Thread(target=_primeiro_boot, daemon=True).start()
+)
 
 # Etapa "alvo" de cada aba (o botão de avanço marca esta etapa).
 # Geral marca 'coletada'; cada aba de fase marca a PRÓXIMA etapa.
