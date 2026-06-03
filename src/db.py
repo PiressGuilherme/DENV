@@ -227,12 +227,27 @@ def _parse_iso(valor) -> Optional["datetime"]:
         return None
 
 
+# ID arbitrário para o advisory lock que serializa a criação de schema entre
+# processos/threads concorrentes (deploys sobrepostos do Render).
+_SCHEMA_LOCK_ID = 728193
+
+
 def criar_schema(con: _Conn) -> None:
-    """Cria tabelas e índices (idempotente) e roda migrações."""
+    """Cria tabelas e índices (idempotente), serializado por advisory lock.
+
+    NÃO roda _migrar: as colunas rejeitada/motivo_rejeicao/data_rejeicao já
+    estão no CREATE TABLE. Rodar ALTER TABLE a cada boot pegava um lock
+    ACCESS EXCLUSIVE que, sob deploys concorrentes, travava a tabela inteira.
+    _migrar fica disponível apenas para uso manual em bancos legados.
+
+    Usa pg_advisory_xact_lock (escopo de transação) — serializa criação
+    concorrente e é seguro com o pooler do Neon (PgBouncer em modo transação),
+    pois é liberado no commit, sem precisar de unlock explícito de sessão.
+    """
+    con.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK_ID,))
     for stmt in _SCHEMA:
         con.execute(stmt.strip())
-    con.commit()
-    _migrar(con)
+    con.commit()  # aplica o schema e libera o advisory lock
     _reclassificar_2026(con)
 
 
