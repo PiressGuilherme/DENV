@@ -30,6 +30,15 @@ class _Conn:
         cur.execute(sql, params or None)
         return cur
 
+    def executar_lote(self, sql: str, seq_params, page_size: int = 500) -> None:
+        """Executa o mesmo SQL para muitos params agrupando em poucas viagens de rede.
+
+        Essencial para o import: 5506 INSERTs num laço = 5506 round-trips até o
+        Neon (~minutos). Com execute_batch isso vira ~12 viagens (~segundos).
+        """
+        cur = self._conn.cursor()
+        psycopg2.extras.execute_batch(cur, sql, seq_params, page_size=page_size)
+
     def commit(self) -> None:
         self._conn.commit()
 
@@ -299,7 +308,9 @@ def construir_filtro(
         clausulas.append("municipio = %s")
         params.append(municipio)
     if busca_ni:
-        clausulas.append("(ni_original LIKE %s OR chave LIKE %s)")
+        # ILIKE = LIKE case-insensitive (PostgreSQL). No SQLite o LIKE já era
+        # case-insensitive; ILIKE preserva esse comportamento para a busca livre.
+        clausulas.append("(ni_original ILIKE %s OR chave ILIKE %s)")
         termo = f"%{busca_ni.strip()}%"
         params.extend([termo, termo])
     if flags_qualquer:

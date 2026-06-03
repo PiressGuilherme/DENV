@@ -241,15 +241,19 @@ ON CONFLICT(chave) DO UPDATE SET
 
 
 def _persistir(con, amostras: dict[str, dict], resultado: ResultadoImport) -> None:
-    """Faz o UPSERT idempotente de cada amostra (passo 7)."""
+    """Faz o UPSERT idempotente de cada amostra em lote (passo 7).
+
+    Usa execute_batch (poucas viagens de rede) — crítico contra um banco remoto
+    como o Neon, onde um INSERT por linha levaria minutos.
+    """
     existentes = {r["chave"] for r in con.execute("SELECT chave FROM amostras").fetchall()}
-    for chave, dados in amostras.items():
-        con.execute(_UPSERT, dados)
+    con.executar_lote(_UPSERT, list(amostras.values()))
+    con.commit()
+    for chave in amostras:
         if chave in existentes:
             resultado.atualizadas += 1
         else:
             resultado.inseridas += 1
-    con.commit()
 
 
 def importar(

@@ -529,8 +529,8 @@ class App:
         self.refresh()
         if db.contar(self.con) == 0:
             ui.notify(
-                "Banco vazio — rode 'python -m src.importer' para popular.",
-                type="warning",
+                "Importando dados pela primeira vez — aguarde ~1 min e recarregue a página.",
+                type="info",
                 timeout=0,
             )
 

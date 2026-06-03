@@ -17,11 +17,13 @@ def con(_pg_schema_con):
         ("D11633/26", 11633, 2026, "CANOAS",       "D11633/26", "ANO_NI_DIVERGE;COLETA_ANTES_SINTOMA"),
         ("SR5/25",    5,     2025, "GRAVATAI",     "SR5/25",    ""),
     ]
+    import re
     for chave, num, ano, mun, ni, flags in amostras:
+        prefixo = re.match(r"[A-Z]+", chave).group()  # "D" para D3/26, "SR" para SR5/25
         c.execute(
             "INSERT INTO amostras (chave, prefixo, numero_sequencial, ano_verdade, "
             "municipio, ni_original, flags) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (chave, chave[:2] if not chave[:2].isdigit() else "D", num, ano, mun, ni, flags),
+            (chave, prefixo, num, ano, mun, ni, flags),
         )
     c.commit()
     return c
