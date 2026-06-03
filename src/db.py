@@ -276,7 +276,7 @@ def valores_distintos(con: _Conn, coluna: str) -> list:
         raise ValueError(f"coluna não permitida para distinct: {coluna!r}")
     rows = con.execute(
         f"SELECT DISTINCT {coluna} FROM amostras "
-        f"WHERE {coluna} IS NOT NULL AND {coluna} != '' ORDER BY {coluna}"
+        f"WHERE {coluna} IS NOT NULL AND {coluna}::text != '' ORDER BY {coluna}"
     ).fetchall()
     return [r[coluna] for r in rows]
 
