@@ -32,20 +32,34 @@ from src import auth, db, export
 
 def _startup_db() -> None:
     """Cria schema e popula o banco no primeiro boot (roda em thread — não bloqueia porta)."""
+    import traceback
+
     if not db._DATABASE_URL:
+        print("[startup] DATABASE_URL não definido — pulando setup do banco.", flush=True)
         return
+
+    # 1. Schema (idempotente)
     try:
-        con = db.init_db()   # cria schema se não existir (idempotente)
+        con = db.init_db()
         n = db.contar(con)
         con.close()
-    except Exception as e:
-        print(f"[startup] Erro ao conectar ao banco: {e}", flush=True)
+        print(f"[startup] Schema OK. Amostras no banco: {n}", flush=True)
+    except Exception:
+        print("[startup] FALHA ao criar schema / conectar:", flush=True)
+        traceback.print_exc()
         return
+
+    # 2. Import (só se vazio)
     if n == 0:
-        print("[startup] Banco vazio — importando dados do xlsx...", flush=True)
-        from src.importer import importar
-        importar(verificar_sanidade=False)
-        print("[startup] Import concluído.", flush=True)
+        print("[startup] Banco vazio — importando xlsx...", flush=True)
+        try:
+            from src.importer import importar
+            r = importar(verificar_sanidade=False)
+            print(f"[startup] Import concluído: {r.amostras_unicas} amostras "
+                  f"({r.inseridas} inseridas).", flush=True)
+        except Exception:
+            print("[startup] FALHA no import:", flush=True)
+            traceback.print_exc()
 
 
 _nicegui_app.on_startup(
@@ -250,13 +264,6 @@ class FaseTab:
 class App:
     def __init__(self):
         self.con = db.conectar()   # schema já foi criado no on_startup
-
-    def close(self) -> None:
-        """Fecha a conexão (chamado quando o client NiceGUI é descartado)."""
-        try:
-            self.con.close()
-        except Exception:
-            pass
         self.tabs: dict[str, FaseTab] = {}
         self._cards: dict[str, ui.label] = {}
         # Estado dos filtros globais (compartilhado por todas as abas).
@@ -265,6 +272,13 @@ class App:
         self.f_busca_ni: str = ""
         self.f_flags: list[str] = []        # flags específicas (qualquer uma)
         self.f_com_flags: Optional[bool] = None  # True/False/None
+
+    def close(self) -> None:
+        """Fecha a conexão (chamado quando o client NiceGUI é descartado)."""
+        try:
+            self.con.close()
+        except Exception:
+            pass
 
     def filtro_where_params(self) -> tuple[Optional[str], list]:
         """(where, params) do filtro global corrente (sem a cláusula de fase)."""
