@@ -19,12 +19,13 @@ Uso:
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from typing import Optional
 
 from nicegui import ui
 
-from src import db, export
+from src import auth, db, export
 
 # Etapa "alvo" de cada aba (o botão de avanço marca esta etapa).
 # Geral marca 'coletada'; cada aba de fase marca a PRÓXIMA etapa.
@@ -440,10 +441,15 @@ class App:
             if com_pct:
                 self._cards[f"{chave}_pct"] = ui.label("").classes("text-grey-6 text-xs")
 
-    def construir(self) -> None:
-        with ui.row().classes("items-baseline gap-2 q-mb-sm"):
-            ui.label("Reprocesso Dengue — LACEN-RS").classes("text-h5")
-            ui.label("controle de coleta · extração · PCR").classes("text-grey-6 text-sm")
+    def construir(self, logout_callback=None) -> None:
+        with ui.row().classes("items-baseline gap-2 q-mb-sm w-full justify-between"):
+            with ui.row().classes("items-baseline gap-2"):
+                ui.label("Reprocesso Dengue — LACEN-RS").classes("text-h5")
+                ui.label("controle de coleta · extração · PCR").classes("text-grey-6 text-sm")
+            if logout_callback:
+                ui.button("Sair", icon="logout", on_click=logout_callback).props(
+                    "flat size=sm color=grey-7"
+                )
 
         with ui.row().classes("gap-4 q-mb-md"):
             self._card("Total", "total", "#607d8b")
@@ -483,13 +489,29 @@ class App:
 
 
 def main() -> None:
-    app = App()
+    _tracker = App()
+
+    auth.build_login_page()
 
     @ui.page("/")
     def index():
-        app.construir()
+        if not auth.is_authenticated():
+            ui.navigate.to("/login")
+            return
+        _tracker.construir(
+            logout_callback=auth.logout if auth.AUTH_ENABLED else None
+        )
 
-    ui.run(title="Reprocesso Dengue", reload=False, port=8080)
+    _port = int(os.environ.get("PORT", "8080"))
+    _host = os.environ.get("HOST", "127.0.0.1")
+    _secret = os.environ.get("APP_SECRET", "dev-secret-local-only")
+    ui.run(
+        title="Reprocesso Dengue",
+        reload=False,
+        port=_port,
+        host=_host,
+        storage_secret=_secret,
+    )
 
 
 # NiceGUI executa o módulo; o guard padrão do framework é __mp_main__.

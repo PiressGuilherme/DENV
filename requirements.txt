@@ -16,6 +16,7 @@
 nicegui==3.12.1
 pandas==3.0.3
 openpyxl==3.1.5
+psycopg2-binary==2.9.12
 
 # --- Desenvolvimento / testes ---
 pytest==9.0.3

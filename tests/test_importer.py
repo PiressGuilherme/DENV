@@ -1,17 +1,8 @@
-"""Testes do importador — Fase 2 (Seção 7/8 do CLAUDE.md).
-
-Cobre:
-    - contagens de sanidade contra a planilha real (5.506 / 3.488 / 2.018 / 1.276);
-    - schema criado corretamente;
-    - IDEMPOTÊNCIA: reimportar não zera o progresso de reprocesso marcado, mas
-      atualiza os campos descritivos.
-
-Usa um DB temporário (tmp_path) — nunca toca o reprocesso.db real.
-"""
+"""Testes do importador — sanidade, schema, idempotência."""
 
 from __future__ import annotations
 
-from pathlib import Path
+import os
 
 import pytest
 
@@ -25,15 +16,14 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture(scope="module")
-def resultado_import(tmp_path_factory):
-    """Importa uma vez para um DB temporário e reaproveita o resultado."""
-    db_path = tmp_path_factory.mktemp("db") / "teste.db"
-    r = importar(XLSX_PADRAO, db_path, verificar_sanidade=False)
-    return r, db_path
+def resultado_import(_pg_schema_con_module):
+    """Importa uma vez para schema isolado e reaproveita no módulo."""
+    r = importar(XLSX_PADRAO, _con=_pg_schema_con_module, verificar_sanidade=False)
+    return r, _pg_schema_con_module
 
 
 # --------------------------------------------------------------------------- #
-# Contagens de sanidade (Seção 7 passo 8)                                      #
+# Contagens de sanidade                                                         #
 # --------------------------------------------------------------------------- #
 class TestContagens:
     def test_total_ignoradas(self, resultado_import):
@@ -47,8 +37,6 @@ class TestContagens:
         assert r.amostras_unicas == 5506
 
     def test_por_ano(self, resultado_import):
-        # Após a reclassificação 2026 (73 amostras D, ni_ano=2026, nº 1–976,
-        # movidas de 2025 para 2026). Antes da regra: 3.488 / 2.018.
         r, _ = resultado_import
         assert r.por_ano.get(2025) == 3415
         assert r.por_ano.get(2026) == 2091
@@ -58,122 +46,94 @@ class TestContagens:
         assert set(r.por_ano) == {2025, 2026}
 
     def test_linhas_no_banco_batem(self, resultado_import):
-        r, db_path = resultado_import
-        con = db.conectar(db_path)
-        try:
-            assert db.contar(con) == r.amostras_unicas
-        finally:
-            con.close()
+        r, con = resultado_import
+        assert db.contar(con) == r.amostras_unicas
 
 
 # --------------------------------------------------------------------------- #
-# Schema + ordenação canônica                                                 #
+# Schema + ordenação canônica                                                  #
 # --------------------------------------------------------------------------- #
 class TestSchemaEOrdenacao:
     def test_tabelas_existem(self, resultado_import):
-        _, db_path = resultado_import
-        con = db.conectar(db_path)
-        try:
-            nomes = {
-                r[0]
-                for r in con.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-            }
-            assert "amostras" in nomes
-            assert "eventos" in nomes
-        finally:
-            con.close()
+        _, con = resultado_import
+        nomes = {
+            r["table_name"]
+            for r in con.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = current_schema()"
+            ).fetchall()
+        }
+        assert "amostras" in nomes
+        assert "eventos" in nomes
 
     def test_ordenacao_canonica_numero_como_int(self, resultado_import):
-        """D1264 deve vir antes de D11633 no mesmo ano/prefixo."""
-        _, db_path = resultado_import
-        con = db.conectar(db_path)
-        try:
-            rows = db.listar_amostras(
-                con, where="prefixo = 'D' AND ano_verdade = 2025"
-            )
-            nums = [r["numero_sequencial"] for r in rows]
-            assert nums == sorted(nums)  # estritamente crescente como int
-            # garante que não está ordenado como texto
-            assert nums[0] < nums[-1]
-        finally:
-            con.close()
+        _, con = resultado_import
+        rows = db.listar_amostras(
+            con, where="prefixo = 'D' AND ano_verdade = 2025"
+        )
+        nums = [r["numero_sequencial"] for r in rows]
+        assert nums == sorted(nums)
+        assert nums[0] < nums[-1]
 
     def test_n_origem_minimo_um(self, resultado_import):
-        _, db_path = resultado_import
-        con = db.conectar(db_path)
-        try:
-            menor = con.execute("SELECT MIN(n_origem) FROM amostras").fetchone()[0]
-            assert menor >= 1
-        finally:
-            con.close()
+        _, con = resultado_import
+        menor = con.execute(
+            "SELECT MIN(n_origem) AS m FROM amostras"
+        ).fetchone()["m"]
+        assert menor >= 1
 
 
 # --------------------------------------------------------------------------- #
-# Idempotência (Seção 7 passo 7 — a exigência crítica)                          #
+# Idempotência                                                                  #
 # --------------------------------------------------------------------------- #
 class TestIdempotencia:
-    def test_reimport_preserva_reprocesso(self, tmp_path):
-        db_path = tmp_path / "idem.db"
-        importar(XLSX_PADRAO, db_path, verificar_sanidade=False)
+    def test_reimport_preserva_reprocesso(self, _pg_schema_con):
+        con = _pg_schema_con
+        importar(XLSX_PADRAO, _con=con, verificar_sanidade=False)
 
-        con = db.conectar(db_path)
-        try:
-            chave = con.execute(
-                "SELECT chave FROM amostras ORDER BY ano_verdade, prefixo, numero_sequencial LIMIT 1"
-            ).fetchone()[0]
-            # marca progresso de reprocesso
-            con.execute(
-                "UPDATE amostras SET coletada=1, extraida=1, "
-                "data_coletada=CURRENT_TIMESTAMP WHERE chave=?",
-                (chave,),
-            )
-            db.registrar_evento(con, chave, "coletada", "1")
-            con.commit()
-        finally:
-            con.close()
+        chave = con.execute(
+            "SELECT chave FROM amostras ORDER BY ano_verdade, prefixo, "
+            "numero_sequencial LIMIT 1"
+        ).fetchone()["chave"]
 
-        # reimporta
-        r2 = importar(XLSX_PADRAO, db_path, verificar_sanidade=False)
+        con.execute(
+            "UPDATE amostras SET coletada=1, extraida=1, "
+            "data_coletada=CURRENT_TIMESTAMP WHERE chave=%s",
+            (chave,),
+        )
+        db.registrar_evento(con, chave, "coletada", "1")
+        con.commit()
 
-        con = db.conectar(db_path)
-        try:
-            row = con.execute(
-                "SELECT coletada, extraida, pcr_feito, data_coletada FROM amostras WHERE chave=?",
-                (chave,),
-            ).fetchone()
-            assert row["coletada"] == 1, "progresso 'coletada' foi zerado no reimport!"
-            assert row["extraida"] == 1, "progresso 'extraida' foi zerado no reimport!"
-            assert row["pcr_feito"] == 0
-            assert row["data_coletada"] is not None
-            # reimport atualiza, não insere duplicata
-            assert r2.amostras_unicas == 5506
-            assert r2.inseridas == 0
-            assert r2.atualizadas == 5506
-        finally:
-            con.close()
+        r2 = importar(XLSX_PADRAO, _con=con, verificar_sanidade=False)
 
-    def test_reimport_atualiza_descritivos(self, tmp_path):
-        db_path = tmp_path / "desc.db"
-        importar(XLSX_PADRAO, db_path, verificar_sanidade=False)
+        row = con.execute(
+            "SELECT coletada, extraida, pcr_feito, data_coletada "
+            "FROM amostras WHERE chave=%s",
+            (chave,),
+        ).fetchone()
+        assert row["coletada"] == 1, "progresso 'coletada' foi zerado no reimport!"
+        assert row["extraida"] == 1, "progresso 'extraida' foi zerado no reimport!"
+        assert row["pcr_feito"] == 0
+        assert row["data_coletada"] is not None
+        assert r2.amostras_unicas == 5506
+        assert r2.inseridas == 0
+        assert r2.atualizadas == 5506
 
-        con = db.conectar(db_path)
-        try:
-            chave = con.execute("SELECT chave FROM amostras LIMIT 1").fetchone()[0]
-            # corrompe um descritivo
-            con.execute("UPDATE amostras SET municipio='XXX' WHERE chave=?", (chave,))
-            con.commit()
-        finally:
-            con.close()
+    def test_reimport_atualiza_descritivos(self, _pg_schema_con):
+        con = _pg_schema_con
+        importar(XLSX_PADRAO, _con=con, verificar_sanidade=False)
 
-        importar(XLSX_PADRAO, db_path, verificar_sanidade=False)
+        chave = con.execute(
+            "SELECT chave FROM amostras LIMIT 1"
+        ).fetchone()["chave"]
 
-        con = db.conectar(db_path)
-        try:
-            muni = con.execute(
-                "SELECT municipio FROM amostras WHERE chave=?", (chave,)
-            ).fetchone()[0]
-            assert muni != "XXX", "descritivo não foi restaurado pelo reimport"
-        finally:
-            con.close()
+        con.execute("UPDATE amostras SET municipio=%s WHERE chave=%s",
+                    ("XXX", chave))
+        con.commit()
+
+        importar(XLSX_PADRAO, _con=con, verificar_sanidade=False)
+
+        muni = con.execute(
+            "SELECT municipio FROM amostras WHERE chave=%s", (chave,)
+        ).fetchone()["municipio"]
+        assert muni != "XXX", "descritivo não foi restaurado pelo reimport"

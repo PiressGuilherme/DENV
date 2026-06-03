@@ -1,4 +1,4 @@
-"""Importador xlsx -> dedup -> SQLite (Seção 7 do CLAUDE.md).
+"""Importador xlsx -> dedup -> PostgreSQL/Neon.
 
 Comportamento exigido:
     1. Ler o xlsx, parsear datas explicitamente.
@@ -14,12 +14,11 @@ Comportamento exigido:
     8. Asserts de sanidade: total ≈ 5.506; 2025 ≈ 3.488; 2026 ≈ 2.018.
 
 Uso CLI:
-    python -m src.importer [caminho_xlsx] [caminho_db]
+    python -m src.importer [caminho_xlsx]
 """
 
 from __future__ import annotations
 
-import sqlite3
 import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -219,9 +218,9 @@ INSERT INTO amostras (
     requisicao, municipio, data_coleta, data_sintomas, caso, n_origem, flags,
     atualizado_em
 ) VALUES (
-    :chave, :prefixo, :numero_sequencial, :ano_verdade, :ni_original, :ni_ano,
-    :requisicao, :municipio, :data_coleta, :data_sintomas, :caso, :n_origem, :flags,
-    CURRENT_TIMESTAMP
+    %(chave)s, %(prefixo)s, %(numero_sequencial)s, %(ano_verdade)s, %(ni_original)s, %(ni_ano)s,
+    %(requisicao)s, %(municipio)s, %(data_coleta)s, %(data_sintomas)s, %(caso)s, %(n_origem)s,
+    %(flags)s, CURRENT_TIMESTAMP
 )
 ON CONFLICT(chave) DO UPDATE SET
     prefixo           = excluded.prefixo,
@@ -241,9 +240,9 @@ ON CONFLICT(chave) DO UPDATE SET
 """
 
 
-def _persistir(con: sqlite3.Connection, amostras: dict[str, dict], resultado: ResultadoImport) -> None:
+def _persistir(con, amostras: dict[str, dict], resultado: ResultadoImport) -> None:
     """Faz o UPSERT idempotente de cada amostra (passo 7)."""
-    existentes = {r[0] for r in con.execute("SELECT chave FROM amostras").fetchall()}
+    existentes = {r["chave"] for r in con.execute("SELECT chave FROM amostras").fetchall()}
     for chave, dados in amostras.items():
         con.execute(_UPSERT, dados)
         if chave in existentes:
@@ -255,16 +254,16 @@ def _persistir(con: sqlite3.Connection, amostras: dict[str, dict], resultado: Re
 
 def importar(
     xlsx: Path | str = XLSX_PADRAO,
-    db_path: Path | str = db.DB_PATH,
     *,
     verificar_sanidade: bool = True,
+    _con=None,
 ) -> ResultadoImport:
     """Executa o import completo (idempotente) e retorna o sumário.
 
     Args:
         xlsx: caminho da planilha de origem (read-only).
-        db_path: caminho do SQLite (criado se não existir).
         verificar_sanidade: se True, assert nas contagens da Seção 7 passo 8.
+        _con: conexão existente (uso interno em testes para schema isolation).
     """
     xlsx = Path(xlsx)
     resultado = ResultadoImport()
@@ -277,11 +276,13 @@ def importar(
         a = dados["ano_verdade"]
         resultado.por_ano[a] = resultado.por_ano.get(a, 0) + 1
 
-    con = db.init_db(db_path)
+    proprio_con = _con is None
+    con = _con if _con else db.init_db()
     try:
         _persistir(con, amostras, resultado)
     finally:
-        con.close()
+        if proprio_con:
+            con.close()
 
     if verificar_sanidade:
         _assert_sanidade(resultado)
@@ -303,8 +304,7 @@ def _assert_sanidade(r: ResultadoImport) -> None:
 
 def main(argv: list[str]) -> int:
     xlsx = Path(argv[1]) if len(argv) > 1 else XLSX_PADRAO
-    db_path = Path(argv[2]) if len(argv) > 2 else db.DB_PATH
-    r = importar(xlsx, db_path, verificar_sanidade=False)
+    r = importar(xlsx, verificar_sanidade=False)
     print(f"Linhas brutas      : {r.linhas_brutas}")
     print(f"Ignoradas sem NI   : {r.ignoradas_sem_ni}")
     print(f"Ignoradas NI inval.: {r.ignoradas_ni_invalido}")

@@ -1,176 +1,194 @@
-"""Camada de banco — SQLite (Seção 4 do CLAUDE.md).
-
-Responsável por: criar o schema, abrir conexões, e fornecer as queries canônicas
-(em especial a ordenação cronológica da Seção 3.3). Nenhuma regra de parsing mora
-aqui — isso é de ``parsing.py``.
-"""
+"""Camada de banco — PostgreSQL via Neon (DATABASE_URL obrigatório)."""
 
 from __future__ import annotations
 
-import sqlite3
-from pathlib import Path
+import os
 from typing import Iterable, Optional
 
-# Caminho default do banco (raiz do projeto). Gitignored.
-DB_PATH = Path(__file__).resolve().parent.parent / "reprocesso.db"
+import psycopg2
+import psycopg2.extras
 
-# Campos que o fluxo de reprocesso controla — NUNCA sobrescritos no reimport
-# (Seção 7, passo 7: idempotência).
+_DATABASE_URL: str = os.environ.get("DATABASE_URL", "")
+
+# --------------------------------------------------------------------------- #
+# Wrapper de conexão                                                            #
+# --------------------------------------------------------------------------- #
+
+
+class _Conn:
+    """Thin wrapper sobre psycopg2 que expõe con.execute() como o sqlite3 faz.
+
+    Cada execute() cria um cursor novo (evita conflito entre queries aninhadas).
+    Usa RealDictCursor — row["campo"] funciona em todo o código.
+    """
+
+    def __init__(self, conn) -> None:
+        self._conn = conn
+
+    def execute(self, sql: str, params=()):
+        cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(sql, params or None)
+        return cur
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+
+# --------------------------------------------------------------------------- #
+# Schema                                                                        #
+# --------------------------------------------------------------------------- #
+
 CAMPOS_REPROCESSO = (
-    "coletada",
-    "extraida",
-    "pcr_feito",
-    "data_coletada",
-    "data_extraida",
-    "data_pcr",
-    "obs_reprocesso",
-    "rejeitada",
-    "motivo_rejeicao",
-    "data_rejeicao",
+    "coletada", "extraida", "pcr_feito",
+    "data_coletada", "data_extraida", "data_pcr",
+    "obs_reprocesso", "rejeitada", "motivo_rejeicao", "data_rejeicao",
 )
 
-# Campos descritivos atualizáveis a cada reimport (vêm da planilha de origem).
 CAMPOS_DESCRITIVOS = (
-    "prefixo",
-    "numero_sequencial",
-    "ano_verdade",
-    "ni_original",
-    "ni_ano",
-    "requisicao",
-    "municipio",
-    "data_coleta",
-    "data_sintomas",
-    "caso",
-    "n_origem",
-    "flags",
+    "prefixo", "numero_sequencial", "ano_verdade",
+    "ni_original", "ni_ano", "requisicao", "municipio",
+    "data_coleta", "data_sintomas", "caso", "n_origem", "flags",
 )
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS amostras (
-    chave               TEXT PRIMARY KEY,
-    prefixo             TEXT NOT NULL,
-    numero_sequencial   INTEGER NOT NULL,
-    ano_verdade         INTEGER NOT NULL,
-    ni_original         TEXT,
-    ni_ano              INTEGER,
-    requisicao          TEXT,
-    municipio           TEXT,
-    data_coleta         DATE,
-    data_sintomas       DATE,
-    caso                TEXT,
-
-    -- FLUXO DE REPROCESSO (o que o sistema controla)
-    coletada            INTEGER NOT NULL DEFAULT 0,
-    extraida            INTEGER NOT NULL DEFAULT 0,
-    pcr_feito           INTEGER NOT NULL DEFAULT 0,
-    data_coletada       TIMESTAMP,
-    data_extraida       TIMESTAMP,
-    data_pcr            TIMESTAMP,
-    obs_reprocesso      TEXT,
-
-    -- REJEIÇÃO (estado terminal alternativo: amostra não entra no fluxo)
-    rejeitada           INTEGER NOT NULL DEFAULT 0,
-    motivo_rejeicao     TEXT,
-    data_rejeicao       TIMESTAMP,
-
-    -- METADADOS / AUDITORIA
-    n_origem            INTEGER NOT NULL DEFAULT 1,
-    flags               TEXT DEFAULT '',
-    importado_em        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    atualizado_em       TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_ordem ON amostras (ano_verdade, prefixo, numero_sequencial);
-CREATE INDEX IF NOT EXISTS idx_municipio ON amostras (municipio);
-CREATE INDEX IF NOT EXISTS idx_flags ON amostras (flags);
-
-CREATE TABLE IF NOT EXISTS eventos (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    chave       TEXT NOT NULL REFERENCES amostras(chave),
-    campo       TEXT NOT NULL,
-    valor_novo  TEXT,
-    em          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-"""
-
-# Ordenação cronológica canônica (Seção 3.3). numero_sequencial é INTEGER.
-ORDER_BY_CANONICO = "ano_verdade ASC, prefixo ASC, numero_sequencial ASC"
-
-
-def conectar(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
-    """Abre uma conexão SQLite com row_factory e foreign keys ligadas."""
-    con = sqlite3.connect(str(db_path))
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA foreign_keys = ON")
-    return con
-
-
-# Colunas adicionadas após a 1ª versão do schema. Migração leve para bancos
-# já existentes (CREATE TABLE IF NOT EXISTS não altera tabelas antigas).
+# Colunas adicionadas após a 1ª versão do schema (migração leve para bancos antigos).
 _COLUNAS_MIGRACAO = {
-    "rejeitada": "INTEGER NOT NULL DEFAULT 0",
+    "rejeitada":      "INTEGER NOT NULL DEFAULT 0",
     "motivo_rejeicao": "TEXT",
-    "data_rejeicao": "TIMESTAMP",
+    "data_rejeicao":  "TIMESTAMP",
 }
 
+_SCHEMA = [
+    """
+    CREATE TABLE IF NOT EXISTS amostras (
+        chave               TEXT PRIMARY KEY,
+        prefixo             TEXT NOT NULL,
+        numero_sequencial   INTEGER NOT NULL,
+        ano_verdade         INTEGER NOT NULL,
+        ni_original         TEXT,
+        ni_ano              INTEGER,
+        requisicao          TEXT,
+        municipio           TEXT,
+        data_coleta         DATE,
+        data_sintomas       DATE,
+        caso                TEXT,
+        coletada            INTEGER NOT NULL DEFAULT 0,
+        extraida            INTEGER NOT NULL DEFAULT 0,
+        pcr_feito           INTEGER NOT NULL DEFAULT 0,
+        data_coletada       TIMESTAMP,
+        data_extraida       TIMESTAMP,
+        data_pcr            TIMESTAMP,
+        obs_reprocesso      TEXT,
+        rejeitada           INTEGER NOT NULL DEFAULT 0,
+        motivo_rejeicao     TEXT,
+        data_rejeicao       TIMESTAMP,
+        n_origem            INTEGER NOT NULL DEFAULT 1,
+        flags               TEXT DEFAULT '',
+        importado_em        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        atualizado_em       TIMESTAMP
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ordem    ON amostras (ano_verdade, prefixo, numero_sequencial)",
+    "CREATE INDEX IF NOT EXISTS idx_municipio ON amostras (municipio)",
+    "CREATE INDEX IF NOT EXISTS idx_flags    ON amostras (flags)",
+    """
+    CREATE TABLE IF NOT EXISTS eventos (
+        id          BIGSERIAL PRIMARY KEY,
+        chave       TEXT NOT NULL REFERENCES amostras(chave) ON UPDATE CASCADE,
+        campo       TEXT NOT NULL,
+        valor_novo  TEXT,
+        em          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+]
 
-def _migrar(con: sqlite3.Connection) -> None:
+ORDER_BY_CANONICO = "ano_verdade ASC, prefixo ASC, numero_sequencial ASC"
+
+FASES: dict[str, str] = {
+    "pendente":  "coletada = 0 AND rejeitada = 0",
+    "coletada":  "coletada = 1 AND extraida = 0 AND rejeitada = 0",
+    "extraida":  "extraida = 1 AND pcr_feito = 0 AND rejeitada = 0",
+    "pcr_feito": "pcr_feito = 1 AND rejeitada = 0",
+    "rejeitada": "rejeitada = 1",
+}
+
+ETAPAS = ("coletada", "extraida", "pcr_feito")
+
+_DATA_DE = {
+    "coletada": "data_coletada",
+    "extraida": "data_extraida",
+    "pcr_feito": "data_pcr",
+}
+
+_PREREQUISITO = {
+    "coletada": None,
+    "extraida": "coletada",
+    "pcr_feito": "extraida",
+}
+
+MOTIVOS_REJEICAO = ("Volume Insuficiente", "Não Encontrada")
+
+# --------------------------------------------------------------------------- #
+# Conexão                                                                       #
+# --------------------------------------------------------------------------- #
+
+
+def conectar() -> _Conn:
+    """Abre uma conexão PostgreSQL usando DATABASE_URL."""
+    return _Conn(psycopg2.connect(_DATABASE_URL))
+
+
+# --------------------------------------------------------------------------- #
+# Schema: criação e migrações                                                   #
+# --------------------------------------------------------------------------- #
+
+
+def _migrar(con: _Conn) -> None:
     """Adiciona colunas novas a bancos pré-existentes (idempotente)."""
-    existentes = {row[1] for row in con.execute("PRAGMA table_info(amostras)").fetchall()}
     for coluna, tipo in _COLUNAS_MIGRACAO.items():
-        if coluna not in existentes:
-            con.execute(f"ALTER TABLE amostras ADD COLUMN {coluna} {tipo}")
+        con.execute(
+            f"ALTER TABLE amostras ADD COLUMN IF NOT EXISTS {coluna} {tipo}"
+        )
     con.commit()
 
 
-def _reclassificar_2026(con: sqlite3.Connection) -> int:
+def _reclassificar_2026(con: _Conn) -> int:
     """Reconcilia bancos já populados com a regra de reclassificação 2026.
 
-    As 73 amostras D (ni_ano=2026, nº 1–976) que foram importadas antes da regra
-    estão como ``D{n}/25`` (ano_verdade=2025) + flag ANO_NI_DIVERGE. Esta migração:
-
-      - move ano_verdade -> 2026 e remapeia a chave para ``D{n}/26``;
-      - recalcula as flags (a divergência some, pois ni_ano passa a bater);
-      - PRESERVA o progresso de reprocesso/rejeição e as datas;
-      - atualiza as referências em ``eventos`` (FK por chave).
-
-    Idempotente: só age sobre linhas que ainda não foram reclassificadas. Roda em
-    transação; se a nova chave já existir (colisão), pula aquela linha por
-    segurança (não há colisão nos dados atuais). Importado tardiamente para
-    evitar ciclo de import com parsing.
+    As 73 amostras D (ni_ano=2026, nº 1–976) importadas antes da regra estão
+    como D{n}/25 (ano_verdade=2025). Move para D{n}/26 preservando progresso.
+    ON UPDATE CASCADE em eventos.chave elimina a necessidade de desabilitar FKs.
+    Idempotente: só age sobre linhas ainda não reclassificadas.
     """
-    from src.parsing import (
-        calcular_flags,
-        montar_chave,
-        reclassificar_2026,
-    )
+    from src.parsing import calcular_flags, montar_chave
+    from src.parsing import reclassificar_2026 as _eh_2026
 
-    # Candidatas ainda não reclassificadas: ni_ano=2026, prefixo D, nº 1–976,
-    # mas ano_verdade ainda != 2026.
     candidatas = con.execute(
         "SELECT chave, prefixo, numero_sequencial, ni_ano, ano_verdade, "
         "data_coleta, data_sintomas "
-        "FROM amostras WHERE prefixo = 'D' AND ni_ano = 2026 "
-        "AND numero_sequencial BETWEEN 1 AND 976 AND ano_verdade != 2026"
+        "FROM amostras WHERE prefixo = %s AND ni_ano = %s "
+        "AND numero_sequencial BETWEEN %s AND %s AND ano_verdade != %s",
+        ("D", 2026, 1, 976, 2026),
     ).fetchall()
 
     if not candidatas:
         return 0
 
-    # A chave é PK referenciada por eventos(chave). Como remapeamos amostras E
-    # eventos no mesmo passo, desligamos a checagem de FK durante a migração
-    # (deve ser feito fora de qualquer transação) e religamos ao final.
-    con.commit()  # encerra transação implícita pendente
-    con.execute("PRAGMA foreign_keys = OFF")
-
     movidas = 0
     for r in candidatas:
-        if not reclassificar_2026(r["prefixo"], r["numero_sequencial"], r["ni_ano"]):
+        if not _eh_2026(r["prefixo"], r["numero_sequencial"], r["ni_ano"]):
             continue
         nova_chave = montar_chave(r["prefixo"], r["numero_sequencial"], 2026)
-        # Evita colisão (não esperada nos dados atuais).
         existe = con.execute(
-            "SELECT 1 FROM amostras WHERE chave = ?", (nova_chave,)
+            "SELECT 1 FROM amostras WHERE chave = %s", (nova_chave,)
         ).fetchone()
         if existe and nova_chave != r["chave"]:
             continue
@@ -180,28 +198,18 @@ def _reclassificar_2026(con: sqlite3.Connection) -> int:
             data_coleta=_parse_iso(r["data_coleta"]),
             data_sintomas=_parse_iso(r["data_sintomas"]),
         )
-        # Atualiza a amostra in-place (preserva progresso/rejeição/datas)...
         con.execute(
-            "UPDATE amostras SET chave = ?, ano_verdade = 2026, flags = ?, "
-            "atualizado_em = CURRENT_TIMESTAMP WHERE chave = ?",
+            "UPDATE amostras SET chave = %s, ano_verdade = 2026, flags = %s, "
+            "atualizado_em = CURRENT_TIMESTAMP WHERE chave = %s",
             (nova_chave, flags, r["chave"]),
         )
-        # ...e as referências de auditoria (FK conferida só no commit).
-        con.execute(
-            "UPDATE eventos SET chave = ? WHERE chave = ?",
-            (nova_chave, r["chave"]),
-        )
         movidas += 1
-
     con.commit()
-    con.execute("PRAGMA foreign_keys = ON")  # religa a checagem de FK
     return movidas
 
 
 def _parse_iso(valor) -> Optional["datetime"]:
-    """Converte 'YYYY-MM-DD' (ou None) em datetime para recálculo de flags."""
     from datetime import datetime
-
     if not valor:
         return None
     try:
@@ -210,29 +218,34 @@ def _parse_iso(valor) -> Optional["datetime"]:
         return None
 
 
-def criar_schema(con: sqlite3.Connection) -> None:
-    """Cria tabelas e índices (idempotente — usa IF NOT EXISTS) e migra colunas."""
-    con.executescript(_SCHEMA)
+def criar_schema(con: _Conn) -> None:
+    """Cria tabelas e índices (idempotente) e roda migrações."""
+    for stmt in _SCHEMA:
+        con.execute(stmt.strip())
+    con.commit()
     _migrar(con)
     _reclassificar_2026(con)
-    con.commit()
 
 
-def init_db(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
+def init_db() -> _Conn:
     """Conveniência: conecta e garante o schema."""
-    con = conectar(db_path)
+    con = conectar()
     criar_schema(con)
     return con
 
 
+# --------------------------------------------------------------------------- #
+# Queries                                                                       #
+# --------------------------------------------------------------------------- #
+
+
 def listar_amostras(
-    con: sqlite3.Connection,
+    con: _Conn,
     *,
     order_by: str = ORDER_BY_CANONICO,
     where: Optional[str] = None,
     params: Iterable = (),
-) -> list[sqlite3.Row]:
-    """Lista amostras na ordenação canônica (default) ou filtrada."""
+) -> list:
     sql = "SELECT * FROM amostras"
     if where:
         sql += f" WHERE {where}"
@@ -241,76 +254,80 @@ def listar_amostras(
 
 
 def registrar_evento(
-    con: sqlite3.Connection,
-    chave: str,
-    campo: str,
-    valor_novo: Optional[str],
+    con: _Conn, chave: str, campo: str, valor_novo: Optional[str]
 ) -> None:
-    """Grava um evento de auditoria (Seção 9: sempre que tocar dados)."""
     con.execute(
-        "INSERT INTO eventos (chave, campo, valor_novo) VALUES (?, ?, ?)",
+        "INSERT INTO eventos (chave, campo, valor_novo) VALUES (%s, %s, %s)",
         (chave, campo, str(valor_novo) if valor_novo is not None else None),
     )
 
 
-def contar(con: sqlite3.Connection, where: Optional[str] = None, params: Iterable = ()) -> int:
-    """Conta amostras (opcionalmente filtradas)."""
-    sql = "SELECT COUNT(*) FROM amostras"
+def contar(con: _Conn, where: Optional[str] = None, params: Iterable = ()) -> int:
+    sql = "SELECT COUNT(*) AS n FROM amostras"
     if where:
         sql += f" WHERE {where}"
-    return int(con.execute(sql, tuple(params)).fetchone()[0])
+    return int(con.execute(sql, tuple(params)).fetchone()["n"])
+
+
+def valores_distintos(con: _Conn, coluna: str) -> list:
+    """Valores distintos não-nulos de uma coluna, ordenados (para dropdowns)."""
+    permitidas = {"ano_verdade", "municipio", "caso", "prefixo"}
+    if coluna not in permitidas:
+        raise ValueError(f"coluna não permitida para distinct: {coluna!r}")
+    rows = con.execute(
+        f"SELECT DISTINCT {coluna} FROM amostras "
+        f"WHERE {coluna} IS NOT NULL AND {coluna} != '' ORDER BY {coluna}"
+    ).fetchall()
+    return [r[coluna] for r in rows]
+
+
+def construir_filtro(
+    *,
+    ano: Optional[int] = None,
+    municipio: Optional[str] = None,
+    busca_ni: Optional[str] = None,
+    flags_qualquer: Optional[Iterable[str]] = None,
+    com_flags: Optional[bool] = None,
+) -> tuple[Optional[str], list]:
+    clausulas: list[str] = []
+    params: list = []
+
+    if ano is not None:
+        clausulas.append("ano_verdade = %s")
+        params.append(ano)
+    if municipio:
+        clausulas.append("municipio = %s")
+        params.append(municipio)
+    if busca_ni:
+        clausulas.append("(ni_original LIKE %s OR chave LIKE %s)")
+        termo = f"%{busca_ni.strip()}%"
+        params.extend([termo, termo])
+    if flags_qualquer:
+        ors = []
+        for f in flags_qualquer:
+            ors.append("flags LIKE %s")
+            params.append(f"%{f}%")
+        if ors:
+            clausulas.append("(" + " OR ".join(ors) + ")")
+    if com_flags is True:
+        clausulas.append("flags != ''")
+    elif com_flags is False:
+        clausulas.append("flags = ''")
+
+    where = " AND ".join(clausulas) if clausulas else None
+    return where, params
 
 
 # --------------------------------------------------------------------------- #
-# Fluxo de reprocesso por fases (kanban)                                       #
+# Fluxo de fases (kanban)                                                       #
 # --------------------------------------------------------------------------- #
-#
-# DECISÃO DO USUÁRIO que SOBREPÕE a Seção 4 do CLAUDE.md ("avisar, não bloquear"):
-# o avanço de fase é ESTRITO. Não se pode marcar Extraída sem Coletada, nem PCR
-# sem Extraída. A UI e o banco recusam transições fora de ordem.
-#
-# A fase é DERIVADA dos 3 booleanos (coletada/extraida/pcr_feito). Como o avanço é
-# estrito, os estados são aninhados (pcr_feito ⇒ extraida ⇒ coletada), então cada
-# amostra cai em EXATAMENTE uma fase — base das abas da UI.
-
-# Etapas em ordem do fluxo. Índice = profundidade.
-ETAPAS = ("coletada", "extraida", "pcr_feito")
-
-# Coluna de data de cada etapa.
-_DATA_DE = {
-    "coletada": "data_coletada",
-    "extraida": "data_extraida",
-    "pcr_feito": "data_pcr",
-}
-
-# Pré-requisito estrito de cada etapa (None = pode marcar livremente).
-_PREREQUISITO = {
-    "coletada": None,
-    "extraida": "coletada",
-    "pcr_feito": "extraida",
-}
-
-# Motivos válidos de rejeição (decisão do usuário).
-MOTIVOS_REJEICAO = ("Volume Insuficiente", "Não Encontrada")
-
-# Mapa fase->cláusula WHERE. Cada amostra cai em exatamente uma (partição completa).
-# Rejeitada é um estado terminal alternativo: amostras rejeitadas saem das demais
-# fases (todas as fases do fluxo exigem rejeitada = 0).
-FASES: dict[str, str] = {
-    "pendente": "coletada = 0 AND rejeitada = 0",
-    "coletada": "coletada = 1 AND extraida = 0 AND rejeitada = 0",
-    "extraida": "extraida = 1 AND pcr_feito = 0 AND rejeitada = 0",
-    "pcr_feito": "pcr_feito = 1 AND rejeitada = 0",
-    "rejeitada": "rejeitada = 1",
-}
 
 
 class TransicaoInvalida(Exception):
-    """Tentativa de avançar/retroceder fora da ordem estrita do fluxo."""
+    pass
 
 
 def where_por_fase(fase: str) -> str:
-    """Devolve a cláusula WHERE de uma fase (para listar_amostras/contar)."""
     try:
         return FASES[fase]
     except KeyError:
@@ -318,43 +335,24 @@ def where_por_fase(fase: str) -> str:
 
 
 def _placeholders(n: int) -> str:
-    return ",".join("?" * n)
+    return ",".join(["%s"] * n)
 
 
-def avancar_fase(
-    con: sqlite3.Connection,
-    chaves: Iterable[str],
-    etapa: str,
-) -> int:
-    """Marca uma etapa=1 (e grava a data) em lote, com avanço ESTRITO.
-
-    Valida o pré-requisito: toda chave selecionada deve ter a etapa anterior
-    concluída. Se alguma não tiver, levanta TransicaoInvalida e NÃO altera nada
-    (transação única). Grava um evento por chave.
-
-    Args:
-        con: conexão SQLite.
-        chaves: chaves das amostras a avançar.
-        etapa: "coletada" | "extraida" | "pcr_feito".
-
-    Returns:
-        Número de amostras efetivamente alteradas.
-    """
+def avancar_fase(con: _Conn, chaves: Iterable[str], etapa: str) -> int:
     if etapa not in ETAPAS:
         raise ValueError(f"etapa desconhecida: {etapa!r}")
-    chaves = list(dict.fromkeys(chaves))  # dedup preservando ordem
+    chaves = list(dict.fromkeys(chaves))
     if not chaves:
         return 0
 
     prereq = _PREREQUISITO[etapa]
     if prereq is not None:
-        # Recusa se alguma chave não tem o pré-requisito feito.
         ph = _placeholders(len(chaves))
         faltando = con.execute(
-            f"SELECT COUNT(*) FROM amostras "
+            f"SELECT COUNT(*) AS n FROM amostras "
             f"WHERE chave IN ({ph}) AND {prereq} = 0",
             chaves,
-        ).fetchone()[0]
+        ).fetchone()["n"]
         if faltando:
             raise TransicaoInvalida(
                 f"{faltando} amostra(s) sem '{prereq}' — não é possível marcar '{etapa}'."
@@ -362,7 +360,6 @@ def avancar_fase(
 
     col_data = _DATA_DE[etapa]
     ph = _placeholders(len(chaves))
-    # Só altera quem ainda não está marcado (idempotente; rowcount = alterações reais).
     cur = con.execute(
         f"UPDATE amostras "
         f"SET {etapa} = 1, "
@@ -378,27 +375,13 @@ def avancar_fase(
     return alteradas
 
 
-def retroceder_fase(
-    con: sqlite3.Connection,
-    chaves: Iterable[str],
-    etapa: str,
-) -> int:
-    """Desmarca uma etapa em lote, limpando também as etapas POSTERIORES.
-
-    Consistência estrita: desmarcar 'coletada' também limpa 'extraida' e
-    'pcr_feito' (uma amostra não pode estar extraída sem estar coletada). Limpa
-    as datas correspondentes. Grava um evento por chave.
-
-    Returns:
-        Número de amostras efetivamente alteradas.
-    """
+def retroceder_fase(con: _Conn, chaves: Iterable[str], etapa: str) -> int:
     if etapa not in ETAPAS:
         raise ValueError(f"etapa desconhecida: {etapa!r}")
     chaves = list(dict.fromkeys(chaves))
     if not chaves:
         return 0
 
-    # Etapa atual + todas as posteriores são zeradas.
     idx = ETAPAS.index(etapa)
     a_limpar = ETAPAS[idx:]
     sets = []
@@ -420,21 +403,7 @@ def retroceder_fase(
     return alteradas
 
 
-def rejeitar(
-    con: sqlite3.Connection,
-    chaves: Iterable[str],
-    motivo: str,
-) -> int:
-    """Rejeita amostras em lote (estado terminal alternativo).
-
-    Decisão do usuário: só é possível rejeitar amostras que ainda estão
-    PENDENTES (não coletadas e não já rejeitadas). Se alguma chave do lote não
-    estiver pendente, recusa o lote inteiro (TransicaoInvalida, atômico). O
-    motivo é obrigatório e deve ser um de MOTIVOS_REJEICAO.
-
-    Returns:
-        Número de amostras efetivamente rejeitadas.
-    """
+def rejeitar(con: _Conn, chaves: Iterable[str], motivo: str) -> int:
     if motivo not in MOTIVOS_REJEICAO:
         raise ValueError(f"motivo inválido: {motivo!r} (use {list(MOTIVOS_REJEICAO)})")
     chaves = list(dict.fromkeys(chaves))
@@ -442,12 +411,11 @@ def rejeitar(
         return 0
 
     ph = _placeholders(len(chaves))
-    # Pré-requisito: todas pendentes (coletada=0 AND rejeitada=0).
     inelegiveis = con.execute(
-        f"SELECT COUNT(*) FROM amostras "
+        f"SELECT COUNT(*) AS n FROM amostras "
         f"WHERE chave IN ({ph}) AND NOT (coletada = 0 AND rejeitada = 0)",
         chaves,
-    ).fetchone()[0]
+    ).fetchone()["n"]
     if inelegiveis:
         raise TransicaoInvalida(
             f"{inelegiveis} amostra(s) não estão pendentes — só é possível "
@@ -456,7 +424,7 @@ def rejeitar(
 
     cur = con.execute(
         f"UPDATE amostras "
-        f"SET rejeitada = 1, motivo_rejeicao = ?, "
+        f"SET rejeitada = 1, motivo_rejeicao = %s, "
         f"    data_rejeicao = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP "
         f"WHERE chave IN ({ph}) AND rejeitada = 0",
         [motivo, *chaves],
@@ -468,11 +436,7 @@ def rejeitar(
     return alteradas
 
 
-def reverter_rejeicao(con: sqlite3.Connection, chaves: Iterable[str]) -> int:
-    """Desfaz a rejeição em lote: a amostra volta a Pendente.
-
-    Limpa rejeitada/motivo/data e grava evento. Returns: nº de alteradas.
-    """
+def reverter_rejeicao(con: _Conn, chaves: Iterable[str]) -> int:
     chaves = list(dict.fromkeys(chaves))
     if not chaves:
         return 0
@@ -491,13 +455,9 @@ def reverter_rejeicao(con: sqlite3.Connection, chaves: Iterable[str]) -> int:
     return alteradas
 
 
-def contagens_por_fase(con: sqlite3.Connection, where: Optional[str] = None,
-                       params: Iterable = ()) -> dict[str, int]:
-    """Contadores de cada fase + total, opcionalmente sobre um subconjunto filtrado.
-
-    Combinando o WHERE do filtro com a cláusula de cada fase, os cards de métrica
-    podem refletir só as amostras visíveis sob os filtros correntes (Fase 4).
-    """
+def contagens_por_fase(
+    con: _Conn, where: Optional[str] = None, params: Iterable = ()
+) -> dict[str, int]:
     params = tuple(params)
     out = {}
     for fase, clausula in FASES.items():
@@ -507,81 +467,6 @@ def contagens_por_fase(con: sqlite3.Connection, where: Optional[str] = None,
     return out
 
 
-# --------------------------------------------------------------------------- #
-# Filtros da UI (Fase 4): ano, município, busca por NI, presença de flags      #
-# --------------------------------------------------------------------------- #
-
 def _combinar_where(*clausulas: Optional[str]) -> Optional[str]:
-    """Junta cláusulas WHERE não-vazias com AND (cada uma entre parênteses)."""
     partes = [f"({c})" for c in clausulas if c]
     return " AND ".join(partes) if partes else None
-
-
-def valores_distintos(con: sqlite3.Connection, coluna: str) -> list:
-    """Valores distintos não-nulos de uma coluna, ordenados (para dropdowns).
-
-    Só aceita colunas conhecidas (evita SQL injection via nome de coluna).
-    """
-    permitidas = {"ano_verdade", "municipio", "caso", "prefixo"}
-    if coluna not in permitidas:
-        raise ValueError(f"coluna não permitida para distinct: {coluna!r}")
-    rows = con.execute(
-        f"SELECT DISTINCT {coluna} FROM amostras "
-        f"WHERE {coluna} IS NOT NULL AND {coluna} != '' ORDER BY {coluna}"
-    ).fetchall()
-    return [r[0] for r in rows]
-
-
-def construir_filtro(
-    *,
-    ano: Optional[int] = None,
-    municipio: Optional[str] = None,
-    busca_ni: Optional[str] = None,
-    flags_qualquer: Optional[Iterable[str]] = None,
-    com_flags: Optional[bool] = None,
-) -> tuple[Optional[str], list]:
-    """Monta (where, params) a partir dos filtros da UI.
-
-    Args:
-        ano: filtra por ano_verdade exato.
-        municipio: filtra por município exato.
-        busca_ni: substring case-insensitive no NI original (ou na chave).
-        flags_qualquer: lista de flags; casa amostras que tenham QUALQUER uma.
-        com_flags: True = só amostras com alguma flag; False = só sem flag;
-                   None = não filtra por presença.
-
-    Returns:
-        (where, params) prontos para listar_amostras/contar. where=None se vazio.
-    """
-    clausulas: list[str] = []
-    params: list = []
-
-    if ano is not None:
-        clausulas.append("ano_verdade = ?")
-        params.append(ano)
-
-    if municipio:
-        clausulas.append("municipio = ?")
-        params.append(municipio)
-
-    if busca_ni:
-        # Busca no NI como veio e também na chave (cobre prefixo/ano formatado).
-        clausulas.append("(ni_original LIKE ? OR chave LIKE ?)")
-        termo = f"%{busca_ni.strip()}%"
-        params.extend([termo, termo])
-
-    if flags_qualquer:
-        ors = []
-        for f in flags_qualquer:
-            ors.append("flags LIKE ?")
-            params.append(f"%{f}%")
-        if ors:
-            clausulas.append("(" + " OR ".join(ors) + ")")
-
-    if com_flags is True:
-        clausulas.append("flags != ''")
-    elif com_flags is False:
-        clausulas.append("flags = ''")
-
-    where = " AND ".join(clausulas) if clausulas else None
-    return where, params

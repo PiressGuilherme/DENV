@@ -1,0 +1,30 @@
+# Render Blueprint — DENV Reprocesso Dengue (LACEN-RS)
+#
+# Deploy via GitHub:
+#   1. Suba este repositório no GitHub (pode ser privado).
+#   2. No Render: New > Blueprint > conectar o repositório.
+#   3. Crie uma conta no Neon (neon.tech) e copie a connection string.
+#   4. No Render, defina as variáveis marcadas como sync: false:
+#        DATABASE_URL  → connection string do Neon (postgresql://...)
+#        APP_EMAIL     → e-mail de acesso (ex: usuario@lacen.rs.gov.br)
+#        APP_PASS      → senha de acesso
+#        APP_SECRET    → string aleatória longa para assinar sessões
+#   5. Primeiro deploy: entrypoint.sh detecta banco vazio e popula via importer.
+
+services:
+  - type: web
+    name: denv-lacen-rs
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: HOST
+        value: "0.0.0.0"
+      - key: DATABASE_URL
+        sync: false
+      - key: APP_EMAIL
+        sync: false
+      - key: APP_PASS
+        sync: false
+      - key: APP_SECRET
+        sync: false

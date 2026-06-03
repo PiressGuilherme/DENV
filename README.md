@@ -1,119 +1,13 @@
 # Reprocesso Dengue — LACEN-RS
 
-Tracker local para controle do **reprocesso de amostras de dengue**. Acompanha cada
+Tracker para controle do **reprocesso de amostras de dengue**. Acompanha cada
 amostra por um fluxo de três etapas — **Coletada → Extraída → PCR feito** — além de um
 estado terminal alternativo de **Rejeição** (volume insuficiente / não encontrada).
 
-Stack: **NiceGUI + SQLite + pandas**. Single-user, roda 100% local no navegador.
+Stack: **NiceGUI + PostgreSQL (Neon) + pandas**. Acesso via navegador com login por e-mail e senha.
 
 > As regras de negócio e decisões de projeto estão em
 > [`CLAUDE_REPROCESSO_DENGUE.md`](CLAUDE_REPROCESSO_DENGUE.md).
-
----
-
-## Requisitos
-
-- **Python 3.11+** (testado em 3.14)
-- A planilha de origem em `data/dengue_coleta_dentro_prazo_mun_ordenado.xlsx`
-  (já versionada neste repositório).
-
----
-
-## Instalação
-
-### Linux / macOS
-
-```bash
-# 1. Clonar e entrar na pasta
-git clone https://github.com/PiressGuilherme/DENV.git
-cd DENV
-
-# 2. Criar e ativar o ambiente virtual
-python3 -m venv .venv
-source .venv/bin/activate
-
-# 3. Instalar as dependências
-pip install -r requirements.txt
-```
-
-> Em algumas distros o pacote de venv é separado. Se `python3 -m venv` falhar,
-> instale-o antes — ex. Debian/Ubuntu: `sudo apt install python3-venv`.
-
-### Windows (PowerShell)
-
-```powershell
-git clone https://github.com/PiressGuilherme/DENV.git
-cd DENV
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
-
-> Se a ativação for bloqueada pela política de execução, rode uma vez:
-> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
-
----
-
-## Uso
-
-O banco **`reprocesso.db` já vem versionado no repositório** (repo privado, sem dados
-sensíveis), então em uma máquina nova ele chega pronto pelo `git clone` — **não precisa
-rodar o importer**. Basta subir a aplicação:
-
-```bash
-python -m src.app
-```
-
-Acesse no navegador: **http://localhost:8080**
-
-### Repopular / atualizar o banco a partir da planilha (opcional)
-
-Só é necessário se você **substituir a planilha** em `data/` por uma versão nova:
-
-```bash
-python -m src.importer
-```
-
-O importador é **idempotente**: reexecutá-lo atualiza os campos descritivos da planilha
-mas **preserva todo o progresso** de reprocesso/rejeição já registrado. Ao final ele
-imprime contagens de sanidade (≈ 5.506 amostras únicas: 3.415 de 2025, 2.091 de 2026).
-
-### Rodar os testes
-
-```bash
-pytest -q
-```
-
----
-
-## Migrar para outra máquina (mantendo o progresso)
-
-Como o `reprocesso.db` é versionado, o progresso (coletada/extraída/PCR/rejeição) viaja
-junto com o git. Na máquina nova:
-
-```bash
-git clone https://github.com/PiressGuilherme/DENV.git
-cd DENV
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-python -m src.app          # o banco já vem com o clone — nada de importer
-```
-
-Para **propagar marcações** de uma máquina para outra depois:
-
-```bash
-# na máquina onde você marcou amostras:
-git add reprocesso.db && git commit -m "progresso de bancada" && git push
-
-# na outra máquina:
-git pull
-```
-
-> ⚠️ **Use uma máquina principal por vez.** O `reprocesso.db` é um arquivo binário: se você
-> marcar amostras em **duas máquinas** sem dar `git pull`/`push` entre elas, o git acusa
-> conflito no binário — que **não tem merge automático** e obrigaria a escolher um dos dois
-> bancos, perdendo o progresso do outro. Para uso simultâneo de verdade, o caminho seria
-> rodar a app num servidor único e os demais acessarem por `http://<ip>:8080`.
 
 ---
 
@@ -123,28 +17,156 @@ git pull
 DENV/
 ├── data/                # planilha de origem (read-only)
 ├── src/
+│   ├── auth.py          # login por e-mail e senha (NiceGUI sessions)
 │   ├── parsing.py       # parse do Número Interno, ano-de-verdade, flags
-│   ├── importer.py      # xlsx -> dedup -> SQLite (idempotente)
-│   ├── db.py            # schema, queries, fluxo de fases, migrações
+│   ├── importer.py      # xlsx -> dedup -> PostgreSQL (idempotente)
+│   ├── db.py            # schema, queries, fluxo de fases
 │   ├── export.py        # export da visão atual em xlsx/csv
 │   └── app.py           # UI NiceGUI (abas por fase, filtros, lote, export)
-├── tests/               # pytest
-├── requirements.txt
-└── reprocesso.db        # banco SQLite — versionado (carrega o progresso)
+├── tests/               # pytest (requer DATABASE_URL para testes de banco)
+├── Dockerfile
+├── render.yaml          # deploy Render via GitHub
+├── entrypoint.sh        # first-boot: popula o Neon a partir do xlsx
+└── requirements.txt
 ```
 
-`reprocesso.db` **é versionado** (carrega o progresso entre máquinas); só os arquivos
-transientes do SQLite (`-journal`/`-wal`/`-shm`) e o `.venv/` são ignorados pelo git
-(ver [`.gitignore`](.gitignore)). A planilha de origem é read-only e nunca é sobrescrita
-pela aplicação.
+---
+
+## Deploy na nuvem — Neon + Render (gratuito, sem cartão)
+
+### 1. Neon — banco PostgreSQL
+
+1. Acesse **[neon.tech](https://neon.tech)** e crie uma conta gratuita.
+2. Clique em **"New Project"** → dê um nome (ex: `denv-lacen`) → **Create project**.
+3. Na tela do projeto, clique em **"Connect"** e copie a **connection string**:
+   ```
+   postgresql://user:senha@ep-xxx.sa-east-1.aws.neon.tech/neondb?sslmode=require
+   ```
+   Guarde essa string — ela será o `DATABASE_URL`.
+
+> **Dica:** Crie uma segunda branch chamada `dev` (menu "Branches → New branch")
+> para usar como banco de desenvolvimento local. Cada branch tem sua própria
+> connection string independente.
+
+---
+
+### 2. GitHub — subir o repositório
+
+Se ainda não tiver o repo no GitHub:
+
+```bash
+git init
+git add .
+git commit -m "initial commit"
+gh repo create denv-lacen-rs --private --push --source=.
+```
+
+Ou faça pelo site: **github.com → New repository → push** do código.
+
+---
+
+### 3. Render — serviço web
+
+1. Acesse **[render.com](https://render.com)** e crie uma conta gratuita (pode usar login GitHub).
+2. No painel: **New → Blueprint**.
+3. Conecte o repositório GitHub que contém o projeto.
+4. O Render detecta o `render.yaml` automaticamente. Clique em **"Apply"**.
+5. Na lista de serviços, clique no serviço **`denv-lacen-rs`** → **"Environment"**.
+6. Adicione as variáveis de ambiente:
+
+   | Variável       | Valor                                    |
+   |----------------|------------------------------------------|
+   | `DATABASE_URL` | connection string copiada do Neon        |
+   | `APP_EMAIL`    | e-mail de acesso (ex: lacen@saude.rs.gov.br) |
+   | `APP_PASS`     | senha de acesso (escolha uma forte)      |
+   | `APP_SECRET`   | string aleatória longa para sessões      |
+
+   > Para gerar um `APP_SECRET` seguro: `python -c "import secrets; print(secrets.token_hex(32))"`
+
+7. Clique em **"Save Changes"** → **"Manual Deploy → Deploy latest commit"**.
+
+#### O que acontece no primeiro deploy
+
+O `entrypoint.sh` detecta que o banco Neon está vazio e executa o importer
+automaticamente (≈ 30 s para importar as 5.506 amostras do xlsx). Nos deploys
+seguintes esse passo é pulado — o banco já tem dados.
+
+Acompanhe em **Render → Logs**:
+```
+[entrypoint] Banco vazio — criando schema e importando xlsx...
+[entrypoint] Import concluído.
+[entrypoint] Iniciando app em 0.0.0.0:10000...
+```
+
+8. Após o deploy, acesse a URL fornecida pelo Render:
+   ```
+   https://denv-lacen-rs.onrender.com
+   ```
+   Faça login com o e-mail e senha definidos acima.
+
+---
+
+### 4. Limitações do plano gratuito
+
+| Serviço | Limite | Impacto |
+|---------|--------|---------|
+| Render free | Dorme após 15 min sem uso | Cold start de ~30 s na primeira requisição do dia |
+| Neon free | 512 MB storage, pausa após 5 dias sem acesso | Banco acorda automaticamente na próxima conexão (~2 s) |
+
+Para evitar o sleep do Render, adicione um cron job externo que faça um GET na
+URL a cada 10 minutos (ex: [cron-job.org](https://cron-job.org) — gratuito).
+
+---
+
+## Desenvolvimento local
+
+Requer uma `DATABASE_URL` apontando para uma branch de desenvolvimento do Neon
+(ou PostgreSQL local).
+
+```bash
+# 1. Clonar
+git clone https://github.com/seu-usuario/denv-lacen-rs.git
+cd denv-lacen-rs
+
+# 2. Ambiente virtual
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+# 3. Configurar banco (branch dev do Neon ou PostgreSQL local)
+export DATABASE_URL="postgresql://..."
+
+# 4. Subir a app (primeiro acesso cria o schema e popula o banco)
+python -m src.app
+```
+
+Acesse: **http://localhost:8080** (sem senha — auth só ativa com `APP_EMAIL`/`APP_PASS`).
+
+### Atualizar o banco a partir de uma nova planilha
+
+```bash
+export DATABASE_URL="postgresql://..."
+python -m src.importer data/nova_planilha.xlsx
+```
+
+O importador é **idempotente**: reexecutá-lo atualiza os campos descritivos mas
+**preserva todo o progresso** de reprocesso/rejeição já registrado.
+
+### Rodar os testes
+
+```bash
+export DATABASE_URL="postgresql://..."   # branch dev do Neon
+pytest -q
+```
+
+Sem `DATABASE_URL`, os 50 testes de parsing rodam normalmente; os 75 testes de
+banco são pulados (`skipped`) com a mensagem `DATABASE_URL não configurado`.
 
 ---
 
 ## Notas
 
-- **Porta**: a aplicação sobe na 8080. Para mudar, ajuste `ui.run(..., port=...)` no
-  fim de [`src/app.py`](src/app.py).
-- **Acesso de outra máquina na rede**: o NiceGUI já escuta em todas as interfaces;
-  basta liberar a porta 8080 no firewall e acessar por `http://<ip-da-maquina>:8080`.
-- **Reset do banco**: apague `reprocesso.db` e rode `python -m src.importer` de novo
-  (isto descarta todo o progresso de reprocesso/rejeição).
+- **Porta local**: padrão 8080. Para mudar: variável `PORT` ou ajuste em `src/app.py`.
+- **Autenticação**: ativada automaticamente quando `APP_EMAIL` e `APP_PASS` estão definidos.
+  Localmente (sem essas variáveis), o acesso é direto.
+- **Backup do banco**: via painel do Neon → **Backups** (automático no plano free) ou
+  exportando a visão atual em CSV/xlsx pela própria interface da aplicação.
