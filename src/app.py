@@ -250,6 +250,13 @@ class FaseTab:
 class App:
     def __init__(self):
         self.con = db.conectar()   # schema já foi criado no on_startup
+
+    def close(self) -> None:
+        """Fecha a conexão (chamado quando o client NiceGUI é descartado)."""
+        try:
+            self.con.close()
+        except Exception:
+            pass
         self.tabs: dict[str, FaseTab] = {}
         self._cards: dict[str, ui.label] = {}
         # Estado dos filtros globais (compartilhado por todas as abas).
@@ -522,7 +529,11 @@ def main() -> None:
         if not auth.is_authenticated():
             ui.navigate.to("/login")
             return
-        App().construir(
+        tracker = App()
+        # Fecha a conexão psycopg2 quando o client é descartado (evita vazar
+        # conexões no Neon). on_delete sobrevive a reconexões de websocket.
+        ui.context.client.on_delete(lambda *_: tracker.close())
+        tracker.construir(
             logout_callback=auth.logout if auth.AUTH_ENABLED else None
         )
 

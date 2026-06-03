@@ -73,7 +73,7 @@ def _valor(r, campo: str):
 
 
 def montar_dataframe(rows: Iterable) -> pd.DataFrame:
-    """Constrói o DataFrame do export a partir das linhas (sqlite3.Row)."""
+    """Constrói o DataFrame do export a partir das linhas (dict-like rows)."""
     registros = []
     for r in rows:
         registros.append({cab: _valor(r, campo) for campo, cab in COLUNAS_EXPORT})
