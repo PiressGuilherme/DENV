@@ -1,12 +1,13 @@
 [project]
 name = "reprocesso-dengue"
-version = "0.1.0"
-description = "Tracker local de reprocesso de amostras de dengue (LACEN-RS) — NiceGUI + SQLite"
+version = "1.0.0"
+description = "Tracker de reprocesso de amostras de dengue (LACEN-RS) — NiceGUI + PostgreSQL (Neon)"
 requires-python = ">=3.11"
 dependencies = [
-    "nicegui>=1.4",
+    "nicegui>=3.0",
     "pandas>=2.0",
     "openpyxl>=3.1",
+    "psycopg2-binary>=2.9.10",
 ]
 
 [project.optional-dependencies]

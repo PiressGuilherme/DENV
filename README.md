@@ -7,7 +7,7 @@ estado terminal alternativo de **Rejeição** (volume insuficiente / não encont
 Stack: **NiceGUI + PostgreSQL (Neon) + pandas**. Acesso via navegador com login por e-mail e senha.
 
 > As regras de negócio e decisões de projeto estão em
-> [`CLAUDE_REPROCESSO_DENGUE.md`](CLAUDE_REPROCESSO_DENGUE.md).
+> [`ESPECIFICACAO.md`](ESPECIFICACAO.md).
 
 ---
 
@@ -24,9 +24,10 @@ DENV/
 │   ├── export.py        # export da visão atual em xlsx/csv
 │   └── app.py           # UI NiceGUI (abas por fase, filtros, lote, export)
 ├── tests/               # pytest (requer DATABASE_URL para testes de banco)
+├── ESPECIFICACAO.md     # regras de negócio (referenciadas pelo código)
 ├── Dockerfile
 ├── render.yaml          # deploy Render via GitHub
-├── entrypoint.sh        # first-boot: popula o Neon a partir do xlsx
+├── entrypoint.sh        # inicia a app; o schema + import rodam no startup
 └── requirements.txt
 ```
 
@@ -87,15 +88,16 @@ Ou faça pelo site: **github.com → New repository → push** do código.
 
 #### O que acontece no primeiro deploy
 
-O `entrypoint.sh` detecta que o banco Neon está vazio e executa o importer
-automaticamente (≈ 30 s para importar as 5.506 amostras do xlsx). Nos deploys
-seguintes esse passo é pulado — o banco já tem dados.
+Ao subir, a app cria o schema e — se o banco Neon estiver vazio — importa as
+5.506 amostras do xlsx automaticamente (em lote, ~3 s). Isso roda numa thread de
+inicialização, então a porta abre na hora e o import acontece em segundo plano.
+Nos deploys seguintes o import é pulado (o banco já tem dados).
 
 Acompanhe em **Render → Logs**:
 ```
-[entrypoint] Banco vazio — criando schema e importando xlsx...
-[entrypoint] Import concluído.
-[entrypoint] Iniciando app em 0.0.0.0:10000...
+[startup] Schema OK. Amostras no banco: 0
+[startup] Banco vazio — importando xlsx...
+[startup] Import concluído: 5506 amostras (5506 inseridas).
 ```
 
 8. Após o deploy, acesse a URL fornecida pelo Render:
@@ -163,10 +165,31 @@ banco são pulados (`skipped`) com a mensagem `DATABASE_URL não configurado`.
 
 ---
 
+## Exportar / fazer backup do banco
+
+O banco vive **só no Neon** (na nuvem) — não há mais cópia local. Há três formas de
+tirar o estado atual:
+
+1. **Export da visão (pela aplicação).** Em qualquer aba há os botões **Exportar
+   xlsx / csv**, que baixam exatamente a visão atual (fase + filtros + ordenação).
+   Use a aba **Geral** sem filtros para exportar todas as 5.506 amostras com o
+   progresso de cada uma. É a forma do dia a dia para relatório de bancada.
+
+2. **Dump SQL completo (backup integral).** Com a connection string do Neon:
+   ```bash
+   pg_dump "postgresql://user:senha@ep-xxx.neon.tech/neondb?sslmode=require" \
+     > backup_$(date +%Y%m%d).sql
+   ```
+   Gera um arquivo restaurável com schema + dados de `amostras` e `eventos`.
+
+3. **Snapshot do Neon.** No painel do Neon, **Branches → New branch** cria uma
+   cópia instantânea do banco no estado atual (point-in-time), útil como ponto de
+   restauração antes de uma mudança grande.
+
+---
+
 ## Notas
 
 - **Porta local**: padrão 8080. Para mudar: variável `PORT` ou ajuste em `src/app.py`.
 - **Autenticação**: ativada automaticamente quando `APP_EMAIL` e `APP_PASS` estão definidos.
   Localmente (sem essas variáveis), o acesso é direto.
-- **Backup do banco**: via painel do Neon → **Backups** (automático no plano free) ou
-  exportando a visão atual em CSV/xlsx pela própria interface da aplicação.

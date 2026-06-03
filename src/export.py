@@ -1,4 +1,4 @@
-"""Export da visão atual (Fase 5, Seção 6.4 do CLAUDE.md).
+"""Export da visão atual (Seção 6.4 da ESPECIFICACAO.md).
 
 Gera xlsx/csv da visão corrente — respeitando filtros e a ordenação canônica —
 SEM reintroduzir as colunas de resultado antigo (Metodologia/Status/Campos). Só

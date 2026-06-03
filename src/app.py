@@ -1,7 +1,6 @@
 """UI NiceGUI — tracker de reprocesso de dengue, organizado por fases (kanban).
 
-Fase 3 do CLAUDE.md, já com o fluxo de trabalho por abas embutido (decisão do
-usuário). Abas:
+Fluxo de trabalho por abas (ver Seção 4 da ESPECIFICACAO.md). Abas:
 
     - Geral: TODAS as amostras, na ordenação canônica (Seção 3.3), com badge da
       fase atual. Visão de auditoria/busca. Daqui marca-se "Coletada" em lote;
@@ -10,7 +9,7 @@ usuário). Abas:
       etapa seguinte em lote, com AVANÇO ESTRITO (bloqueia fora de ordem), e
       permite RETROCEDER (desmarcar).
 
-Toda ação persiste no SQLite, grava evento de auditoria e atualiza as grades +
+Toda ação persiste no PostgreSQL, grava evento de auditoria e atualiza as grades +
 contadores. A lógica de fase mora em db.py; aqui é só a casca de UI.
 
 Uso:
@@ -128,7 +127,7 @@ def _badge_html(fase: str) -> str:
 
 
 def _linha_para_dict(r) -> dict:
-    """Converte uma Row do SQLite no dict que o AG-Grid consome."""
+    """Converte uma linha do banco no dict que o AG-Grid consome."""
     fase = _fase_da_linha(r)
     return {
         "chave": r["chave"],                    # usada como rowId

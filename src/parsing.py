@@ -1,7 +1,7 @@
 """Parsing e regras de negócio do Número Interno (NI) de amostras de dengue.
 
 Este módulo é a base de toda a ordenação cronológica do sistema. As regras aqui
-implementadas seguem a Seção 3 do CLAUDE.md (decisões do usuário — não reabrir):
+implementadas seguem a Seção 3 da ESPECIFICACAO.md (decisões do usuário — não reabrir):
 
 - 3.1 Ano-de-verdade = ano da Data da Coleta (vence o ano embutido no NI).
 - 3.2 Chave de amostra = "{prefixo}{numero_sequencial}/{ano_verdade_2digitos}".
@@ -245,7 +245,7 @@ def chave_ordenacao(prefixo: str, numero_sequencial: int, ano_verdade_: int) -> 
     """Chave de ordenação cronológica canônica (Seção 3.3).
 
     Espelha em Python o ``ORDER BY ano_verdade ASC, prefixo ASC,
-    numero_sequencial ASC`` do SQLite. ``numero_sequencial`` é INTEGER — é o que
+    numero_sequencial ASC`` do banco. ``numero_sequencial`` é INTEGER — é o que
     garante D1264 < D11633.
     """
     return (ano_verdade_, prefixo, numero_sequencial)
