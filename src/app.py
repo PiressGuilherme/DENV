@@ -30,16 +30,17 @@ from nicegui import ui
 from src import auth, db, export
 
 
-def _primeiro_boot() -> None:
-    """Popula o banco na primeira execução em produção (roda em thread separada)."""
+def _startup_db() -> None:
+    """Cria schema e popula o banco no primeiro boot (roda em thread — não bloqueia porta)."""
     if not db._DATABASE_URL:
         return
     try:
-        con = db.conectar()
+        con = db.init_db()   # cria schema se não existir (idempotente)
         n = db.contar(con)
         con.close()
-    except Exception:
-        n = 0
+    except Exception as e:
+        print(f"[startup] Erro ao conectar ao banco: {e}", flush=True)
+        return
     if n == 0:
         print("[startup] Banco vazio — importando dados do xlsx...", flush=True)
         from src.importer import importar
@@ -48,7 +49,7 @@ def _primeiro_boot() -> None:
 
 
 _nicegui_app.on_startup(
-    lambda: threading.Thread(target=_primeiro_boot, daemon=True).start()
+    lambda: threading.Thread(target=_startup_db, daemon=True).start()
 )
 
 # Etapa "alvo" de cada aba (o botão de avanço marca esta etapa).
@@ -247,8 +248,8 @@ class FaseTab:
 
 
 class App:
-    def __init__(self, db_path=None):
-        self.con = db.init_db(db_path) if db_path else db.init_db()
+    def __init__(self):
+        self.con = db.conectar()   # schema já foi criado no on_startup
         self.tabs: dict[str, FaseTab] = {}
         self._cards: dict[str, ui.label] = {}
         # Estado dos filtros globais (compartilhado por todas as abas).
@@ -513,8 +514,6 @@ class App:
 
 
 def main() -> None:
-    _tracker = App()
-
     auth.build_login_page()
 
     @ui.page("/")
@@ -522,7 +521,7 @@ def main() -> None:
         if not auth.is_authenticated():
             ui.navigate.to("/login")
             return
-        _tracker.construir(
+        App().construir(
             logout_callback=auth.logout if auth.AUTH_ENABLED else None
         )
 
