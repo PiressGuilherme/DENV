@@ -484,13 +484,22 @@ def reverter_rejeicao(con: _Conn, chaves: Iterable[str]) -> int:
 def contagens_por_fase(
     con: _Conn, where: Optional[str] = None, params: Iterable = ()
 ) -> dict[str, int]:
-    params = tuple(params)
-    out = {}
-    for fase, clausula in FASES.items():
-        w = _combinar_where(where, clausula)
-        out[fase] = contar(con, where=w, params=params)
-    out["total"] = contar(con, where=where, params=params)
-    return out
+    """Contagem de cada fase + total numa ÚNICA query (COUNT FILTER).
+
+    Antes eram 6 viagens ao banco (uma por fase + total). As cláusulas de FASES
+    são estáticas (sem placeholders), então entram direto no FILTER; os params
+    pertencem só ao WHERE do filtro global, aplicado uma vez.
+    """
+    selects = [
+        f"COUNT(*) FILTER (WHERE {clausula}) AS {fase}"
+        for fase, clausula in FASES.items()
+    ]
+    selects.append("COUNT(*) AS total")
+    sql = f"SELECT {', '.join(selects)} FROM amostras"
+    if where:
+        sql += f" WHERE {where}"
+    row = con.execute(sql, tuple(params)).fetchone()
+    return {chave: int(row[chave]) for chave in (*FASES.keys(), "total")}
 
 
 def _combinar_where(*clausulas: Optional[str]) -> Optional[str]:

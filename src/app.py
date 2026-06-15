@@ -74,6 +74,15 @@ _PROXIMA_ETAPA = {
     "extraida": "pcr_feito",
 }
 
+# Nome da aba (ui.tab) -> chave de fase. Usado no on_change para o load lazy.
+_TAB_FASE = {
+    "Geral": "geral",
+    "Coletadas": "coletada",
+    "Extraídas": "extraida",
+    "PCR feito": "pcr_feito",
+    "Rejeitadas": "rejeitada",
+}
+
 # Rótulos PT-BR das fases (badge/coluna).
 _LABEL_FASE = {
     "pendente": "Pendente",
@@ -181,6 +190,7 @@ class FaseTab:
         self.app = app
         self.fase = fase  # "geral" | "pendente" | "coletada" | "extraida" | "pcr_feito"
         self.grid: Optional[ui.aggrid] = None
+        self._carregado = False  # lazy: só consulta o banco quando a aba é vista
         self._montar()
 
     def _montar(self) -> None:
@@ -223,7 +233,8 @@ class FaseTab:
                     ui.menu_item("CSV (.csv)",
                                  on_click=lambda: self.app.exportar(self, "csv"))
 
-        dados = self._carregar_dados()
+        # Grade criada VAZIA: os dados entram via garantir_carregado() só quando
+        # a aba é vista pela 1ª vez (lazy). Evita carregar 5 abas no page load.
         self.grid = ui.aggrid({
             "columnDefs": _colunas(com_motivo=(self.fase == "rejeitada")),
             # API de seleção do AG-Grid v33+ (checkboxSelection no colDef foi removido):
@@ -235,11 +246,19 @@ class FaseTab:
             },
             "defaultColDef": {"sortable": True, "resizable": True},
             ":getRowId": "params => params.data.chave",
-            "rowData": dados,  # já com dados no 1º paint (evita grade em branco)
+            "rowData": [],
         }, html_columns=[_COL_FASE_IDX], auto_size_columns=False).classes(
             "w-full"
         ).style("height: 65vh")
-        self.label_contagem.text = f"{len(dados)} amostra(s)"
+
+    def garantir_carregado(self) -> None:
+        """Carrega os dados da aba se ainda não foram carregados (lazy)."""
+        if not self._carregado:
+            self.recarregar()
+
+    def invalidar(self) -> None:
+        """Marca a aba como desatualizada (recarrega na próxima vez que for vista)."""
+        self._carregado = False
 
     def _where_params(self) -> tuple[Optional[str], list]:
         """Combina a cláusula da fase com o filtro global da App."""
@@ -258,12 +277,14 @@ class FaseTab:
         self.grid.options["rowData"] = dados
         self.grid.update()
         self.label_contagem.text = f"{len(dados)} amostra(s)"
+        self._carregado = True
 
 
 class App:
     def __init__(self):
         self.con = db.conectar()   # schema já foi criado no on_startup
         self.tabs: dict[str, FaseTab] = {}
+        self._fase_ativa = "geral"  # aba visível (para o refresh lazy)
         self._cards: dict[str, ui.label] = {}
         # Estado dos filtros globais (compartilhado por todas as abas).
         self.f_ano: Optional[int] = None
@@ -418,9 +439,19 @@ class App:
 
     # -- render ------------------------------------------------------------ #
     def refresh(self) -> None:
+        """Após uma ação/filtro: recarrega só a aba VISÍVEL e atualiza os cards.
+
+        As demais abas são marcadas como desatualizadas e só recarregam quando o
+        usuário as abre (lazy) — evita re-consultar as 5 abas a cada operação.
+        """
         for tab in self.tabs.values():
-            tab.recarregar()
-        # Métricas refletem o subconjunto sob os filtros correntes (Fase 4).
+            tab.invalidar()
+        if self._fase_ativa in self.tabs:
+            self.tabs[self._fase_ativa].garantir_carregado()
+        self._atualizar_cards()
+
+    def _atualizar_cards(self) -> int:
+        """Atualiza os cards de métrica (1 query) e devolve o total filtrado."""
         where, params = self.filtro_where_params()
         cont = db.contagens_por_fase(self.con, where=where, params=params)
         total = cont["total"]
@@ -429,6 +460,14 @@ class App:
             self._cards[chave].text = str(cont[chave])
             pct = (cont[chave] / total * 100) if total else 0
             self._cards[f"{chave}_pct"].text = f"{pct:.0f}% do total"
+        return total
+
+    def _on_tab_change(self, e) -> None:
+        """Carrega sob demanda a aba recém-aberta (lazy)."""
+        fase = _TAB_FASE.get(e.value)
+        if fase:
+            self._fase_ativa = fase
+            self.tabs[fase].garantir_carregado()
 
     def aplicar_filtros(self) -> None:
         """Lê os controles, atualiza o estado e recarrega tudo."""
@@ -506,7 +545,7 @@ class App:
 
         self._montar_filtros()
 
-        with ui.tabs().classes("w-full") as tabs:
+        with ui.tabs(on_change=self._on_tab_change).classes("w-full") as tabs:
             t_geral = ui.tab("Geral")
             t_col = ui.tab("Coletadas")
             t_ext = ui.tab("Extraídas")
@@ -525,8 +564,11 @@ class App:
             with ui.tab_panel(t_rej):
                 self.tabs["rejeitada"] = FaseTab(self, "rejeitada")
 
-        self.refresh()
-        if db.contar(self.con) == 0:
+        # Load inicial: só a aba visível (Geral) consulta o banco; as outras
+        # carregam ao serem abertas (lazy). Os cards trazem o total numa query.
+        self.tabs["geral"].garantir_carregado()
+        total = self._atualizar_cards()
+        if total == 0:
             ui.notify(
                 "Importando dados pela primeira vez — aguarde ~1 min e recarregue a página.",
                 type="info",
