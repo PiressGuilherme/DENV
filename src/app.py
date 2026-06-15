@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -463,9 +464,14 @@ class App:
         return total
 
     def _on_tab_change(self, e) -> None:
-        """Carrega sob demanda a aba recém-aberta (lazy)."""
+        """Carrega sob demanda a aba recém-aberta (lazy).
+
+        O on_change dispara também durante a construção (quando tab_panels define
+        a aba inicial), antes de self.tabs existir — daí o guard 'fase in self.tabs'.
+        O load inicial da Geral é feito explicitamente no fim de construir().
+        """
         fase = _TAB_FASE.get(e.value)
-        if fase:
+        if fase and fase in self.tabs:
             self._fase_ativa = fase
             self.tabs[fase].garantir_carregado()
 
@@ -584,13 +590,21 @@ def main() -> None:
         if not auth.is_authenticated():
             ui.navigate.to("/login")
             return
-        tracker = App()
+        t0 = time.perf_counter()
+        tracker = App()                       # abre conexão ao Neon
+        t_conn = time.perf_counter()
         # Fecha a conexão psycopg2 quando o client é descartado (evita vazar
         # conexões no Neon). on_delete sobrevive a reconexões de websocket.
         ui.context.client.on_delete(lambda *_: tracker.close())
         tracker.construir(
             logout_callback=auth.logout if auth.AUTH_ENABLED else None
         )
+        t_end = time.perf_counter()
+        # Diagnóstico de latência server-side (ver logs do Render):
+        #   connect = abrir conexão ao Neon (inclui acordar se suspenso)
+        #   build   = queries do page load + montagem da UI
+        print(f"[perf] connect {(t_conn - t0) * 1000:.0f}ms · "
+              f"build {(t_end - t_conn) * 1000:.0f}ms", flush=True)
 
     _port = int(os.environ.get("PORT", "8080"))
     _host = os.environ.get("HOST", "127.0.0.1")
