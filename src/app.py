@@ -5,12 +5,20 @@ Fluxo de trabalho por abas (ver Seção 4 da ESPECIFICACAO.md). Abas:
     - Geral: TODAS as amostras, na ordenação canônica (Seção 3.3), com badge da
       fase atual. Visão de auditoria/busca. Daqui marca-se "Coletada" em lote;
       amostras que já entraram no fluxo (qualquer status) NÃO podem reentrar.
-    - Coletadas / Extraídas / PCR feito: recortes por fase. Cada aba avança a
-      etapa seguinte em lote, com AVANÇO ESTRITO (bloqueia fora de ordem), e
-      permite RETROCEDER (desmarcar).
+    - Coletadas / Extraídas / PCR feito / Sequenciadas: recortes por fase. Cada
+      aba avança a etapa seguinte em lote, com AVANÇO ESTRITO (bloqueia fora de
+      ordem), e permite RETROCEDER (desmarcar).
+
+Sequenciadas é um SUBCONJUNTO de PCR feito, não um sucessor: a amostra enviada
+para sequenciamento continua listada em PCR feito, que é onde os resultados de
+PCR (Ct por sorotipo) são consultados. Por isso os cards não somam o total.
+
+A aba PCR feito tem ainda o import de resultados (xlsx/csv com NI + DEN1..DEN4),
+com prévia antes de gravar — ver abrir_dialogo_resultados e src/resultados.py.
 
 Toda ação persiste no PostgreSQL, grava evento de auditoria e atualiza as grades +
-contadores. A lógica de fase mora em db.py; aqui é só a casca de UI.
+contadores. A lógica de fase mora em db.py; aqui é só a casca de UI — as abas,
+cards, badges e rótulos são DERIVADOS de db.ETAPAS_DEF.
 
 Uso:
     python -m src.app
@@ -27,7 +35,7 @@ from typing import Optional
 from nicegui import app as _nicegui_app
 from nicegui import ui
 
-from src import auth, db, export
+from src import auth, db, export, resultados
 
 
 def _startup_db() -> None:
@@ -66,65 +74,36 @@ _nicegui_app.on_startup(
     lambda: threading.Thread(target=_startup_db, daemon=True).start()
 )
 
-# Etapa "alvo" de cada aba (o botão de avanço marca esta etapa).
-# Geral marca 'coletada'; cada aba de fase marca a PRÓXIMA etapa.
-_PROXIMA_ETAPA = {
-    "geral": "coletada",
-    "pendente": "coletada",
-    "coletada": "extraida",
-    "extraida": "pcr_feito",
-}
+_FASE_GERAL = "geral"
+
+# Abas, na ordem de exibição: Geral + uma por etapa + Rejeitadas. Derivado de
+# db.ETAPAS_DEF — uma etapa nova ganha aba, card e badge sem editar app.py.
+_ABAS: tuple[tuple[str, str], ...] = (
+    (_FASE_GERAL, "Geral"),
+    *((e.chave, e.label_aba) for e in db.ETAPAS_DEF),
+    (db.FASE_REJEITADA, "Rejeitadas"),
+)
 
 # Nome da aba (ui.tab) -> chave de fase. Usado no on_change para o load lazy.
-_TAB_FASE = {
-    "Geral": "geral",
-    "Coletadas": "coletada",
-    "Extraídas": "extraida",
-    "PCR feito": "pcr_feito",
-    "Rejeitadas": "rejeitada",
-}
+_TAB_FASE = {rotulo: fase for fase, rotulo in _ABAS}
 
-# Rótulos PT-BR das fases (badge/coluna).
-_LABEL_FASE = {
-    "pendente": "Pendente",
-    "coletada": "Coletada",
-    "extraida": "Extraída",
-    "pcr_feito": "PCR feito",
-    "rejeitada": "Rejeitada",
-}
+# Fases com card de métrica (todas menos a Geral, que já é o card "Total").
+# ATENÇÃO: os cards NÃO somam o total — 'Sequenciadas' é um subconjunto de
+# 'PCR feito' (db.Etapa.exclusiva=False), então essas amostras contam nos dois.
+_FASES_COM_CARD: tuple[str, ...] = tuple(
+    fase for fase, _ in _ABAS if fase != _FASE_GERAL
+)
 
-# Cor do badge por fase (classes Tailwind do NiceGUI/Quasar).
-_COR_FASE = {
-    "pendente": "grey",
-    "coletada": "blue",
-    "extraida": "amber",
-    "pcr_feito": "green",
-    "rejeitada": "red",
-}
-
-_ETAPA_LABEL = {"coletada": "Coletada", "extraida": "Extraída", "pcr_feito": "PCR feito"}
-
-
-def _fase_da_linha(r) -> str:
-    """Deriva a fase de uma linha (espelha db.FASES; partição completa)."""
-    if r["rejeitada"]:
-        return "rejeitada"
-    if r["pcr_feito"]:
-        return "pcr_feito"
-    if r["extraida"]:
-        return "extraida"
-    if r["coletada"]:
-        return "coletada"
-    return "pendente"
-
-
-# Cor (hex) do badge por fase, para o HTML inline da célula.
-_HEX_FASE = {
-    "pendente": "#9e9e9e",
-    "coletada": "#2196f3",
-    "extraida": "#ff9800",
-    "pcr_feito": "#4caf50",
-    "rejeitada": "#e53935",
+# Etapa "alvo" de cada aba (o botão de avanço marca esta etapa).
+# Geral/Pendente marcam a 1ª etapa; cada aba de etapa marca a SEGUINTE.
+_PROXIMA_ETAPA = {
+    _FASE_GERAL: db.ETAPAS[0],
+    db.FASE_PENDENTE: db.ETAPAS[0],
+    **{
+        etapa.chave: db.ETAPAS[i + 1]
+        for i, etapa in enumerate(db.ETAPAS_DEF)
+        if i + 1 < len(db.ETAPAS_DEF)
+    },
 }
 
 
@@ -132,13 +111,17 @@ def _badge_html(fase: str) -> str:
     """HTML do badge da fase (renderizado via html_columns do NiceGUI)."""
     return (
         f'<span style="padding:2px 8px;border-radius:10px;color:white;'
-        f'font-size:11px;background:{_HEX_FASE[fase]}">{_LABEL_FASE[fase]}</span>'
+        f'font-size:11px;background:{db.COR_FASE[fase]}">{db.LABEL_FASE[fase]}</span>'
     )
+
+
+def _ct_para_display(valor) -> str:
+    """Ct para exibição: None (não detectado) vira vazio, não 'None'."""
+    return "" if valor is None else f"{float(valor):.1f}"
 
 
 def _linha_para_dict(r) -> dict:
     """Converte uma linha do banco no dict que o AG-Grid consome."""
-    fase = _fase_da_linha(r)
     return {
         "chave": r["chave"],                    # usada como rowId
         "ni": r["ni_original"] or r["chave"],   # display
@@ -148,18 +131,25 @@ def _linha_para_dict(r) -> dict:
         "data_coleta": r["data_coleta"] or "",
         "data_sintomas": r["data_sintomas"] or "",
         "caso": r["caso"] or "",
-        "fase": _badge_html(fase),              # HTML (ver _COL_FASE_IDX em html_columns)
+        "fase": _badge_html(db.fase_da_linha(r)),   # HTML (ver html_columns)
         "motivo": r["motivo_rejeicao"] or "",
+        "sorotipo": resultados.sorotipo_de(r),
+        **{
+            db.coluna_ct(s): _ct_para_display(r[db.coluna_ct(s)])
+            for s in db.SOROTIPOS
+        },
         "flags": r["flags"] or "",
         "n_origem": r["n_origem"],
     }
 
 
-# Índice (0-based) da coluna "Fase" — registrado como html_column na grade.
-_COL_FASE_IDX = 7
+def _colunas(*, com_motivo: bool = False, com_resultado: bool = False) -> tuple[list[dict], int]:
+    """Colunas da grade + índice da coluna 'Fase' (que renderiza HTML).
 
-
-def _colunas(com_motivo: bool = False) -> list[dict]:
+    Devolve o índice em vez de mantê-lo como constante: com colunas condicionais
+    (motivo, resultado) um índice fixo quebraria silenciosamente — a coluna Fase
+    passaria a exibir HTML cru se algo entrasse antes dela.
+    """
     # Checkbox de seleção: configurado via rowSelection (API v33+), não por colDef.
     # Larguras explícitas (sem 'flex') para não conflitar com auto_size_columns.
     cols = [
@@ -171,17 +161,26 @@ def _colunas(com_motivo: bool = False) -> list[dict]:
         {"headerName": "Data Coleta", "field": "data_coleta", "width": 130},
         {"headerName": "Data 1º Sintoma", "field": "data_sintomas", "width": 140},
         {"headerName": "Caso", "field": "caso", "width": 120},
-        {"headerName": "Fase", "field": "fase", "width": 130},  # idx 7: html_columns
+        {"headerName": "Fase", "field": "fase", "width": 130},
     ]
+    idx_fase = len(cols) - 1
     if com_motivo:
         cols.append({"headerName": "Motivo", "field": "motivo", "filter": True,
                      "width": 180})
+    if com_resultado:
+        cols.append({"headerName": "Sorotipo", "field": "sorotipo", "filter": True,
+                     "width": 130})
+        cols += [
+            {"headerName": f"{s} (Ct)", "field": db.coluna_ct(s),
+             "type": "numericColumn", "width": 100}
+            for s in db.SOROTIPOS
+        ]
     cols += [
         {"headerName": "Flags", "field": "flags", "filter": True, "width": 260},
         {"headerName": "Nº origem", "field": "n_origem", "type": "numericColumn",
          "width": 110},
     ]
-    return cols
+    return cols, idx_fase
 
 
 class FaseTab:
@@ -189,7 +188,7 @@ class FaseTab:
 
     def __init__(self, app: "App", fase: str):
         self.app = app
-        self.fase = fase  # "geral" | "pendente" | "coletada" | "extraida" | "pcr_feito"
+        self.fase = fase  # _FASE_GERAL, uma chave de db.ETAPAS ou db.FASE_REJEITADA
         self.grid: Optional[ui.aggrid] = None
         self._carregado = False  # lazy: só consulta o banco quando a aba é vista
         self._montar()
@@ -199,26 +198,33 @@ class FaseTab:
         with ui.row().classes("w-full items-center gap-2 q-mb-sm"):
             if etapa:
                 ui.button(
-                    f"Marcar {_ETAPA_LABEL[etapa]}",
+                    f"Marcar {db.ETAPA_POR_CHAVE[etapa].label}",
                     icon="arrow_forward",
                     on_click=lambda: self.app.avancar(self, etapa),
                 ).props("color=primary")
             # Rejeitar: só na Geral (rejeita amostras pendentes).
-            if self.fase == "geral":
+            if self.fase == _FASE_GERAL:
                 ui.button(
                     "Rejeitar",
                     icon="block",
                     on_click=lambda: self.app.abrir_dialogo_rejeicao(self),
                 ).props("color=negative outline")
-            # Retroceder: só nas abas de fase concreta (não na Geral nem Pendente).
-            if self.fase in ("coletada", "extraida", "pcr_feito"):
+            # Retroceder: só nas abas de etapa concreta (não na Geral nem Pendente).
+            if self.fase in db.ETAPA_POR_CHAVE:
                 ui.button(
-                    f"Desmarcar {_LABEL_FASE[self.fase]}",
+                    f"Desmarcar {db.LABEL_FASE[self.fase]}",
                     icon="undo",
                     on_click=lambda: self.app.retroceder(self, self.fase),
                 ).props("color=negative outline")
+            # Import de resultados: só na etapa que produz PCR.
+            if self.fase == db.ETAPA_RESULTADO:
+                ui.button(
+                    "Importar resultados",
+                    icon="upload_file",
+                    on_click=self.app.abrir_dialogo_resultados,
+                ).props("color=secondary outline")
             # Reverter: só na aba Rejeitadas (volta a Pendente).
-            if self.fase == "rejeitada":
+            if self.fase == db.FASE_REJEITADA:
                 ui.button(
                     "Reverter rejeição",
                     icon="undo",
@@ -235,9 +241,13 @@ class FaseTab:
                                  on_click=lambda: self.app.exportar(self, "csv"))
 
         # Grade criada VAZIA: os dados entram via garantir_carregado() só quando
-        # a aba é vista pela 1ª vez (lazy). Evita carregar 5 abas no page load.
+        # a aba é vista pela 1ª vez (lazy). Evita carregar todas as abas no load.
+        colunas, idx_fase = _colunas(
+            com_motivo=(self.fase == db.FASE_REJEITADA),
+            com_resultado=(self.fase in db.FASES_COM_RESULTADO),
+        )
         self.grid = ui.aggrid({
-            "columnDefs": _colunas(com_motivo=(self.fase == "rejeitada")),
+            "columnDefs": colunas,
             # API de seleção do AG-Grid v33+ (checkboxSelection no colDef foi removido):
             "rowSelection": {
                 "mode": "multiRow",
@@ -248,7 +258,7 @@ class FaseTab:
             "defaultColDef": {"sortable": True, "resizable": True},
             ":getRowId": "params => params.data.chave",
             "rowData": [],
-        }, html_columns=[_COL_FASE_IDX], auto_size_columns=False).classes(
+        }, html_columns=[idx_fase], auto_size_columns=False).classes(
             "w-full"
         ).style("height: 65vh")
 
@@ -263,7 +273,7 @@ class FaseTab:
 
     def _where_params(self) -> tuple[Optional[str], list]:
         """Combina a cláusula da fase com o filtro global da App."""
-        fase_where = None if self.fase == "geral" else db.where_por_fase(self.fase)
+        fase_where = None if self.fase == _FASE_GERAL else db.where_por_fase(self.fase)
         filtro_where, params = self.app.filtro_where_params()
         where = db._combinar_where(fase_where, filtro_where)
         return where, params
@@ -285,7 +295,7 @@ class App:
     def __init__(self):
         self.con = db.conectar()   # schema já foi criado no on_startup
         self.tabs: dict[str, FaseTab] = {}
-        self._fase_ativa = "geral"  # aba visível (para o refresh lazy)
+        self._fase_ativa = _FASE_GERAL  # aba visível (para o refresh lazy)
         self._cards: dict[str, ui.label] = {}
         # Estado dos filtros globais (compartilhado por todas as abas).
         self.f_ano: Optional[int] = None
@@ -293,6 +303,7 @@ class App:
         self.f_busca_ni: str = ""
         self.f_flags: list[str] = []        # flags específicas (qualquer uma)
         self.f_com_flags: Optional[bool] = None  # True/False/None
+        self.f_sorotipo: Optional[str] = None    # 'DEN1'..'DEN4' ou não detectado
 
     def close(self) -> None:
         """Fecha a conexão (chamado quando o client NiceGUI é descartado)."""
@@ -309,6 +320,7 @@ class App:
             busca_ni=self.f_busca_ni or None,
             flags_qualquer=self.f_flags or None,
             com_flags=self.f_com_flags,
+            sorotipo=self.f_sorotipo,
         )
 
     # -- helpers de seleção/ação ------------------------------------------- #
@@ -322,7 +334,7 @@ class App:
             ui.notify("Selecione ao menos uma amostra.", type="warning")
             return
         # Na Geral, amostras que já têm status não reentram: filtra elegíveis.
-        if tab.fase == "geral" and etapa == "coletada":
+        if tab.fase == _FASE_GERAL and etapa == db.ETAPAS[0]:
             elegiveis, ignoradas = self._filtrar_nao_coletadas(chaves)
             if ignoradas:
                 ui.notify(
@@ -338,7 +350,7 @@ class App:
         except db.TransicaoInvalida as e:
             ui.notify(str(e), type="negative")
             return
-        ui.notify(f"{n} amostra(s) → {_ETAPA_LABEL[etapa]}.", type="positive")
+        ui.notify(f"{n} amostra(s) → {db.LABEL_FASE[etapa]}.", type="positive")
         self.refresh()
 
     async def retroceder(self, tab: FaseTab, etapa: str) -> None:
@@ -347,7 +359,7 @@ class App:
             ui.notify("Selecione ao menos uma amostra.", type="warning")
             return
         n = db.retroceder_fase(self.con, chaves, etapa)
-        ui.notify(f"{n} amostra(s) retrocedida(s) de {_LABEL_FASE[etapa]}.", type="positive")
+        ui.notify(f"{n} amostra(s) retrocedida(s) de {db.LABEL_FASE[etapa]}.", type="positive")
         self.refresh()
 
     async def abrir_dialogo_rejeicao(self, tab: FaseTab) -> None:
@@ -416,6 +428,118 @@ class App:
         elegiveis = [c for c in chaves if c not in ja]
         return elegiveis, len(ja)
 
+    # -- import de resultados ---------------------------------------------- #
+    def abrir_dialogo_resultados(self) -> None:
+        """Diálogo de import de resultados de PCR (xlsx/csv com NI + DEN1..DEN4).
+
+        Fluxo em DOIS passos — prévia e confirmação. O usuário vê exatamente o
+        que será gravado e o que foi descartado (com o motivo) antes de qualquer
+        escrita; sem isso, um cabeçalho errado viraria "0 amostras atualizadas"
+        sem explicação.
+        """
+        with ui.dialog() as dialogo, ui.card().classes("w-[46rem]"):
+            # Botão de fechar SEMPRE presente, fora das áreas que são limpas a
+            # cada upload — é o que garante que o modal nunca prenda o usuário.
+            with ui.row().classes("w-full items-center no-wrap"):
+                ui.label("Importar resultados de PCR").classes("text-bold text-lg")
+                ui.space()
+                ui.button(icon="close", on_click=dialogo.close).props("flat round dense")
+            ui.label(
+                f"Planilha .xlsx ou .csv com as colunas NI, {', '.join(db.SOROTIPOS)}. "
+                "Célula vazia = sorotipo não detectado; preenchida = valor de Ct."
+            ).classes("text-grey-7 text-sm")
+
+            area_resultado = ui.column().classes("w-full")
+            rodape = ui.row().classes("w-full justify-end gap-2")
+
+            async def ao_subir(evento) -> None:
+                area_resultado.clear()
+                self._rodape_fechar(rodape, dialogo)
+                try:
+                    # NiceGUI 3.x: o arquivo vem em evento.file e read() é async.
+                    conteudo = await evento.file.read()
+                    df = resultados.ler_arquivo(conteudo, evento.file.name)
+                    plano = resultados.montar_plano(
+                        df, db.indice_para_resultados(self.con)
+                    )
+                except resultados.ArquivoInvalido as e:
+                    ui.notify(str(e), type="negative", timeout=8000)
+                    return
+                except Exception as e:  # noqa: BLE001
+                    # Qualquer falha inesperada tem que virar aviso visível. Sem
+                    # isso a exceção só apareceria no log e o modal ficaria
+                    # parado, sem prévia e sem explicação.
+                    ui.notify(f"Falha ao ler a planilha: {e}", type="negative",
+                              timeout=10000)
+                    return
+
+                self._render_previa(area_resultado, plano)
+                self._render_acoes(rodape, dialogo, plano)
+
+            ui.upload(
+                on_upload=ao_subir, max_files=1, auto_upload=True,
+                label="Selecione a planilha",
+            ).props('accept=".xlsx,.xlsm,.csv"').classes("w-full")
+
+            self._rodape_fechar(rodape, dialogo)
+        dialogo.open()
+
+    def _rodape_fechar(self, rodape, dialogo) -> None:
+        rodape.clear()
+        with rodape:
+            ui.button("Fechar", on_click=dialogo.close).props("flat")
+
+    def _render_previa(self, area, plano) -> None:
+        """Resumo do que será gravado + ignoradas agrupadas por motivo."""
+        with area:
+            with ui.row().classes("items-center gap-4 q-mt-sm"):
+                ui.label(f"{len(plano.aplicaveis)} serão atualizadas").classes(
+                    "text-positive text-bold"
+                )
+                ui.label(f"{len(plano.ignoradas)} ignoradas").classes("text-grey-7")
+                ui.label(f"({plano.linhas_lidas} linhas lidas)").classes(
+                    "text-grey-6 text-xs"
+                )
+
+            for motivo, linhas in plano.por_motivo().items():
+                with ui.expansion(f"{motivo} — {len(linhas)}").classes("w-full"):
+                    ui.label(
+                        ", ".join(f"{l.ni} (linha {l.linha_num})" for l in linhas[:50])
+                        + (" …" if len(linhas) > 50 else "")
+                    ).classes("text-xs text-grey-7")
+
+    def _render_acoes(self, rodape, dialogo, plano) -> None:
+        with rodape:
+            if plano.ignoradas:
+                ui.button(
+                    "Baixar ignoradas (CSV)", icon="download",
+                    on_click=lambda: ui.download(
+                        resultados.ignoradas_para_csv(plano),
+                        f"resultados_ignorados_{datetime.now():%Y%m%d_%H%M}.csv",
+                        "text/csv",
+                    ),
+                ).props("flat color=secondary")
+            ui.button("Cancelar", on_click=dialogo.close).props("flat")
+            ui.button(
+                f"Gravar {len(plano.aplicaveis)}", icon="save",
+                on_click=lambda: self._confirmar_resultados(dialogo, plano),
+            ).props("color=primary").set_enabled(bool(plano.aplicaveis))
+
+    def _confirmar_resultados(self, dialogo, plano) -> None:
+        try:
+            n = db.gravar_resultados(self.con, plano.registros())
+        except Exception as e:  # noqa: BLE001 — erro de banco vira aviso, não stack trace
+            ui.notify(f"Falha ao gravar resultados: {e}", type="negative", timeout=8000)
+            return
+        dialogo.close()
+        # n < esperado significa que outro import gravou antes (guarda
+        # data_resultado IS NULL) — reportar o número real, não o pretendido.
+        extra = "" if n == len(plano.aplicaveis) else (
+            f" ({len(plano.aplicaveis) - n} já haviam sido gravadas por outro import)"
+        )
+        ui.notify(f"{n} resultado(s) gravado(s).{extra}", type="positive")
+        self.refresh()
+
     # -- export ------------------------------------------------------------ #
     def exportar(self, tab: FaseTab, formato: str) -> None:
         """Exporta a visão da aba (filtro + fase + ordenação) em xlsx/csv."""
@@ -425,7 +549,7 @@ class App:
             ui.notify("Nada para exportar na visão atual.", type="warning")
             return
 
-        nome_aba = "geral" if tab.fase == "geral" else tab.fase
+        nome_aba = tab.fase
         ts = datetime.now().strftime("%Y%m%d_%H%M")
         if formato == "xlsx":
             conteudo = export.para_xlsx_bytes(rows, sheet_name=nome_aba)
@@ -457,7 +581,7 @@ class App:
         cont = db.contagens_por_fase(self.con, where=where, params=params)
         total = cont["total"]
         self._cards["total"].text = str(total)
-        for chave in ("coletada", "extraida", "pcr_feito", "rejeitada"):
+        for chave in _FASES_COM_CARD:
             self._cards[chave].text = str(cont[chave])
             pct = (cont[chave] / total * 100) if total else 0
             self._cards[f"{chave}_pct"].text = f"{pct:.0f}% do total"
@@ -482,6 +606,7 @@ class App:
         self.f_busca_ni = (self._ctl_busca.value or "").strip()
         flags = list(self._ctl_flags.value or [])
         self.f_flags = flags
+        self.f_sorotipo = self._ctl_sorotipo.value or None
         self.refresh()
 
     def limpar_filtros(self) -> None:
@@ -489,6 +614,7 @@ class App:
         self._ctl_municipio.value = None
         self._ctl_busca.value = ""
         self._ctl_flags.value = []
+        self._ctl_sorotipo.value = None
         self.aplicar_filtros()
 
     def _montar_filtros(self) -> None:
@@ -519,6 +645,13 @@ class App:
                 self._ctl_flags = ui.select(
                     flags_disp, label="Flags", multiple=True, clearable=True
                 ).props("dense use-chips").classes("w-72")
+                self._ctl_sorotipo = ui.select(
+                    {
+                        **{s: s.replace("DEN", "DENV-") for s in db.SOROTIPOS},
+                        db.SOROTIPO_NAO_DETECTADO: "Não detectado",
+                    },
+                    label="Sorotipo", clearable=True,
+                ).props("dense").classes("w-40")
 
                 ui.button("Filtrar", icon="filter_alt",
                           on_click=lambda: self.aplicar_filtros()).props("color=primary")
@@ -542,37 +675,32 @@ class App:
                     "flat size=sm color=grey-7"
                 )
 
-        with ui.row().classes("gap-4 q-mb-md"):
+        # flex-wrap: com uma etapa a mais os cards não cabem numa linha só.
+        with ui.row().classes("gap-4 q-mb-md flex-wrap"):
             self._card("Total", "total", "#607d8b")
-            self._card("Coletadas", "coletada", "#2196f3", com_pct=True)
-            self._card("Extraídas", "extraida", "#ff9800", com_pct=True)
-            self._card("PCR feito", "pcr_feito", "#4caf50", com_pct=True)
-            self._card("Rejeitadas", "rejeitada", "#e53935", com_pct=True)
+            for fase in _FASES_COM_CARD:
+                self._card(
+                    db.ETAPA_POR_CHAVE[fase].label_aba
+                    if fase in db.ETAPA_POR_CHAVE else db.LABEL_FASE[fase],
+                    fase, db.COR_FASE[fase], com_pct=True,
+                )
 
         self._montar_filtros()
 
+        # Abas e painéis derivados de _ABAS (que vem de db.ETAPAS_DEF).
+        objetos_tab = {}
         with ui.tabs(on_change=self._on_tab_change).classes("w-full") as tabs:
-            t_geral = ui.tab("Geral")
-            t_col = ui.tab("Coletadas")
-            t_ext = ui.tab("Extraídas")
-            t_pcr = ui.tab("PCR feito")
-            t_rej = ui.tab("Rejeitadas")
+            for fase, rotulo in _ABAS:
+                objetos_tab[fase] = ui.tab(rotulo)
 
-        with ui.tab_panels(tabs, value=t_geral).classes("w-full"):
-            with ui.tab_panel(t_geral):
-                self.tabs["geral"] = FaseTab(self, "geral")
-            with ui.tab_panel(t_col):
-                self.tabs["coletada"] = FaseTab(self, "coletada")
-            with ui.tab_panel(t_ext):
-                self.tabs["extraida"] = FaseTab(self, "extraida")
-            with ui.tab_panel(t_pcr):
-                self.tabs["pcr_feito"] = FaseTab(self, "pcr_feito")
-            with ui.tab_panel(t_rej):
-                self.tabs["rejeitada"] = FaseTab(self, "rejeitada")
+        with ui.tab_panels(tabs, value=objetos_tab[_FASE_GERAL]).classes("w-full"):
+            for fase, _ in _ABAS:
+                with ui.tab_panel(objetos_tab[fase]):
+                    self.tabs[fase] = FaseTab(self, fase)
 
         # Load inicial: só a aba visível (Geral) consulta o banco; as outras
         # carregam ao serem abertas (lazy). Os cards trazem o total numa query.
-        self.tabs["geral"].garantir_carregado()
+        self.tabs[_FASE_GERAL].garantir_carregado()
         total = self._atualizar_cards()
         if total == 0:
             ui.notify(

@@ -15,6 +15,24 @@ from typing import Iterable, Sequence
 
 import pandas as pd
 
+from src import db, resultados
+
+# Etapas do fluxo, cada uma com sua coluna de data — derivado de db.ETAPAS_DEF
+# para que uma etapa nova entre no export sem editar esta lista.
+_COLUNAS_ETAPAS: tuple[tuple[str, str], ...] = tuple(
+    par
+    for etapa in db.ETAPAS_DEF
+    for par in (
+        (etapa.chave, etapa.label),
+        (etapa.coluna_data, etapa.label_data),
+    )
+)
+
+# Ct por sorotipo, também derivado (db.SOROTIPOS).
+_COLUNAS_CT: tuple[tuple[str, str], ...] = tuple(
+    (db.coluna_ct(s), f"{s} (Ct)") for s in db.SOROTIPOS
+)
+
 # Colunas exportadas, na ordem de exibição. (campo_no_banco, cabeçalho PT-BR).
 # Apenas campos do reprocesso + contexto mínimo — nunca as colunas antigas.
 COLUNAS_EXPORT: Sequence[tuple[str, str]] = (
@@ -26,48 +44,29 @@ COLUNAS_EXPORT: Sequence[tuple[str, str]] = (
     ("data_sintomas", "Data 1º Sintoma"),
     ("caso", "Caso"),
     ("fase", "Fase"),
-    ("coletada", "Coletada"),
-    ("data_coletada", "Data Coletada"),
-    ("extraida", "Extraída"),
-    ("data_extraida", "Data Extraída"),
-    ("pcr_feito", "PCR feito"),
-    ("data_pcr", "Data PCR"),
+    *_COLUNAS_ETAPAS,
     ("rejeitada", "Rejeitada"),
     ("motivo_rejeicao", "Motivo Rejeição"),
     ("data_rejeicao", "Data Rejeição"),
+    ("sorotipo", "Sorotipo"),
+    *_COLUNAS_CT,
+    ("data_resultado", "Data Resultado"),
     ("flags", "Flags"),
     ("n_origem", "Nº origem"),
 )
 
-_LABEL_FASE = {
-    "pendente": "Pendente",
-    "coletada": "Coletada",
-    "extraida": "Extraída",
-    "pcr_feito": "PCR feito",
-    "rejeitada": "Rejeitada",
-}
-
-
-def _fase_da_linha(r) -> str:
-    """Deriva o rótulo da fase (espelha db.FASES; partição completa)."""
-    if r["rejeitada"]:
-        return _LABEL_FASE["rejeitada"]
-    if r["pcr_feito"]:
-        return _LABEL_FASE["pcr_feito"]
-    if r["extraida"]:
-        return _LABEL_FASE["extraida"]
-    if r["coletada"]:
-        return _LABEL_FASE["coletada"]
-    return _LABEL_FASE["pendente"]
+# Campos 0/1 que viram Sim/Não para leitura humana na bancada.
+_CAMPOS_BOOLEANOS = frozenset({*(e.chave for e in db.ETAPAS_DEF), "rejeitada"})
 
 
 def _valor(r, campo: str):
-    """Extrai o valor de uma linha para o export, normalizando booleanos/fase."""
+    """Extrai o valor de uma linha para o export, normalizando booleanos/derivados."""
     if campo == "fase":
-        return _fase_da_linha(r)
+        return db.LABEL_FASE[db.fase_da_linha(r)]
+    if campo == "sorotipo":
+        return resultados.sorotipo_de(r)
     val = r[campo]
-    # Campos 0/1 viram Sim/Não para leitura humana na bancada.
-    if campo in ("coletada", "extraida", "pcr_feito", "rejeitada"):
+    if campo in _CAMPOS_BOOLEANOS:
         return "Sim" if val else "Não"
     return val
 

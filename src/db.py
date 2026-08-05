@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import Iterable, Optional
 
 import psycopg2
@@ -39,6 +40,18 @@ class _Conn:
         cur = self._conn.cursor()
         psycopg2.extras.execute_batch(cur, sql, seq_params, page_size=page_size)
 
+    def executar_values(self, sql: str, seq_params, template: Optional[str] = None) -> int:
+        """Executa UM comando com muitas tuplas via VALUES, devolvendo o rowcount.
+
+        Diferente de executar_lote (que roda N comandos e perde o rowcount real),
+        aqui tudo vira um único statement — então cur.rowcount é exato. É o que
+        permite reportar com honestidade quantas linhas o import de resultados
+        realmente gravou quando o UPDATE tem cláusula de guarda.
+        """
+        cur = self._conn.cursor()
+        psycopg2.extras.execute_values(cur, sql, list(seq_params), template=template)
+        return cur.rowcount
+
     def commit(self) -> None:
         self._conn.commit()
 
@@ -56,10 +69,111 @@ class _Conn:
 # Schema                                                                        #
 # --------------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------------- #
+# Registro de etapas — fonte ÚNICA da verdade do fluxo                          #
+# --------------------------------------------------------------------------- #
+# Tudo que descreve uma etapa (coluna, data, pré-requisito, rótulo, cor) mora
+# aqui. FASES, ETAPAS, os rótulos da UI e as cláusulas SQL são DERIVADOS deste
+# registro — adicionar uma etapa é acrescentar uma linha nesta tupla, não editar
+# sete dicionários paralelos espalhados por db.py/app.py/export.py.
+
+
+@dataclass(frozen=True)
+class Etapa:
+    """Uma etapa do fluxo de reprocesso.
+
+    Attributes:
+        chave: identificador e nome da coluna 0/1 em `amostras`.
+        label: rótulo PT-BR no singular (badge, export, botões).
+        label_aba: rótulo no plural (aba e card de métrica).
+        cor: cor hex do badge/card.
+        coluna_data: coluna TIMESTAMP que registra quando a etapa foi marcada.
+            Explícita porque a convenção não é uniforme (pcr_feito -> data_pcr).
+        label_data: cabeçalho da coluna de data no export. Explícito para manter
+            'Data PCR' (e não 'Data PCR feito') em planilhas já em uso.
+        prerequisito: etapa que precisa estar marcada antes (avanço estrito).
+        exclusiva: se True, marcar esta etapa REMOVE a amostra da aba da etapa
+            anterior. Se False, a amostra permanece visível também na anterior —
+            é o caso de 'sequenciado', que é um recorte de 'pcr_feito' e não um
+            sucessor: a aba PCR feito continua sendo onde os resultados de PCR
+            são consultados, mesmo depois do envio para sequenciamento.
+    """
+
+    chave: str
+    label: str
+    label_aba: str
+    cor: str
+    coluna_data: str
+    label_data: str
+    prerequisito: Optional[str]
+    exclusiva: bool = True
+
+    @property
+    def coluna(self) -> str:
+        return self.chave
+
+
+ETAPAS_DEF: tuple[Etapa, ...] = (
+    Etapa("coletada",    "Coletada",    "Coletadas",    "#2196f3",
+          "data_coletada",    "Data Coletada",    None),
+    Etapa("extraida",    "Extraída",    "Extraídas",    "#ff9800",
+          "data_extraida",    "Data Extraída",    "coletada"),
+    Etapa("pcr_feito",   "PCR feito",   "PCR feito",    "#4caf50",
+          "data_pcr",         "Data PCR",         "extraida"),
+    Etapa("sequenciado", "Sequenciada", "Sequenciadas", "#7e57c2",
+          "data_sequenciado", "Data Sequenciada", "pcr_feito", exclusiva=False),
+)
+
+ETAPA_POR_CHAVE: dict[str, Etapa] = {e.chave: e for e in ETAPAS_DEF}
+
+# Etapa em que os resultados de PCR são produzidos. Define onde o botão de
+# import aparece e a partir de qual fase as colunas de Ct fazem sentido.
+ETAPA_RESULTADO = "pcr_feito"
+
+# Fases cujas amostras já passaram pela PCR — logo, exibem Ct/sorotipo.
+FASES_COM_RESULTADO: frozenset[str] = frozenset(
+    e.chave
+    for e in ETAPAS_DEF[next(i for i, e in enumerate(ETAPAS_DEF)
+                             if e.chave == ETAPA_RESULTADO):]
+)
+
+# Fases "virtuais": não são etapas marcáveis, mas aparecem como aba/card/badge.
+FASE_PENDENTE = "pendente"
+FASE_REJEITADA = "rejeitada"
+
+_COR_PENDENTE = "#9e9e9e"
+_COR_REJEITADA = "#e53935"
+
+# --------------------------------------------------------------------------- #
+# Sorotipos / resultados de PCR                                                 #
+# --------------------------------------------------------------------------- #
+# Valores de Ct (threshold cycle). NULL = sorotipo não detectado / não informado.
+# `data_resultado` é o que define "já tem resultado" de forma inequívoca: um Ct
+# nulo sozinho é ambíguo (pode ser negativo OU nunca preenchido).
+
+SOROTIPOS: tuple[str, ...] = ("DEN1", "DEN2", "DEN3", "DEN4")
+
+# Opção de filtro para "tem resultado, mas nenhum sorotipo detectado".
+SOROTIPO_NAO_DETECTADO = "__nd__"
+
+
+def coluna_ct(sorotipo: str) -> str:
+    """Nome da coluna de Ct de um sorotipo ('DEN1' -> 'den1_ct')."""
+    return f"{sorotipo.lower()}_ct"
+
+
+COLUNAS_CT: tuple[str, ...] = tuple(coluna_ct(s) for s in SOROTIPOS)
+
+# Faixa plausível de Ct numa PCR em tempo real. Fora disso o valor é recusado
+# (quase sempre é erro de digitação ou coluna trocada na planilha).
+CT_MIN = 0.0
+CT_MAX = 50.0
+
 CAMPOS_REPROCESSO = (
-    "coletada", "extraida", "pcr_feito",
-    "data_coletada", "data_extraida", "data_pcr",
+    *(e.chave for e in ETAPAS_DEF),
+    *(e.coluna_data for e in ETAPAS_DEF),
     "obs_reprocesso", "rejeitada", "motivo_rejeicao", "data_rejeicao",
+    *COLUNAS_CT, "data_resultado",
 )
 
 CAMPOS_DESCRITIVOS = (
@@ -73,6 +187,10 @@ _COLUNAS_MIGRACAO = {
     "rejeitada":      "INTEGER NOT NULL DEFAULT 0",
     "motivo_rejeicao": "TEXT",
     "data_rejeicao":  "TIMESTAMP",
+    "sequenciado":    "INTEGER NOT NULL DEFAULT 0",
+    "data_sequenciado": "TIMESTAMP",
+    **{c: "NUMERIC(6,2)" for c in COLUNAS_CT},
+    "data_resultado": "TIMESTAMP",
 }
 
 _SCHEMA = [
@@ -92,13 +210,20 @@ _SCHEMA = [
         coletada            INTEGER NOT NULL DEFAULT 0,
         extraida            INTEGER NOT NULL DEFAULT 0,
         pcr_feito           INTEGER NOT NULL DEFAULT 0,
+        sequenciado         INTEGER NOT NULL DEFAULT 0,
         data_coletada       TIMESTAMP,
         data_extraida       TIMESTAMP,
         data_pcr            TIMESTAMP,
+        data_sequenciado    TIMESTAMP,
         obs_reprocesso      TEXT,
         rejeitada           INTEGER NOT NULL DEFAULT 0,
         motivo_rejeicao     TEXT,
         data_rejeicao       TIMESTAMP,
+        den1_ct             NUMERIC(6,2),
+        den2_ct             NUMERIC(6,2),
+        den3_ct             NUMERIC(6,2),
+        den4_ct             NUMERIC(6,2),
+        data_resultado      TIMESTAMP,
         n_origem            INTEGER NOT NULL DEFAULT 1,
         flags               TEXT DEFAULT '',
         importado_em        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -121,27 +246,73 @@ _SCHEMA = [
 
 ORDER_BY_CANONICO = "ano_verdade ASC, prefixo ASC, numero_sequencial ASC"
 
+def _clausula_da_etapa(indice: int, etapa: Etapa) -> str:
+    """Cláusula SQL que define a aba de uma etapa.
+
+    A amostra sai da aba quando alcança a PRÓXIMA etapa exclusiva — etapas não
+    exclusivas (sequenciado) não removem a amostra da aba anterior, por isso são
+    ignoradas na busca pelo sucessor.
+    """
+    partes = [f"{etapa.coluna} = 1"]
+    sucessora = next((e for e in ETAPAS_DEF[indice + 1:] if e.exclusiva), None)
+    if sucessora is not None:
+        partes.append(f"{sucessora.coluna} = 0")
+    partes.append("rejeitada = 0")
+    return " AND ".join(partes)
+
+
+# Cláusula SQL de cada fase — usada pelas abas e pelos contadores.
+# ATENÇÃO: NÃO é uma partição. 'sequenciado' é um SUBCONJUNTO de 'pcr_feito'
+# (exclusiva=False), logo somar todas as fases conta essas amostras duas vezes.
+# Para invariantes de partição use FASES_EXCLUSIVAS.
 FASES: dict[str, str] = {
-    "pendente":  "coletada = 0 AND rejeitada = 0",
-    "coletada":  "coletada = 1 AND extraida = 0 AND rejeitada = 0",
-    "extraida":  "extraida = 1 AND pcr_feito = 0 AND rejeitada = 0",
-    "pcr_feito": "pcr_feito = 1 AND rejeitada = 0",
-    "rejeitada": "rejeitada = 1",
+    FASE_PENDENTE: f"{ETAPAS_DEF[0].coluna} = 0 AND rejeitada = 0",
+    **{e.chave: _clausula_da_etapa(i, e) for i, e in enumerate(ETAPAS_DEF)},
+    FASE_REJEITADA: "rejeitada = 1",
 }
 
-ETAPAS = ("coletada", "extraida", "pcr_feito")
-
-_DATA_DE = {
-    "coletada": "data_coletada",
-    "extraida": "data_extraida",
-    "pcr_feito": "data_pcr",
+# Subconjunto disjunto que cobre 100% das amostras — cada amostra cai em
+# exatamente uma destas. É o conjunto correto para checar a invariante de soma.
+FASES_EXCLUSIVAS: dict[str, str] = {
+    fase: clausula
+    for fase, clausula in FASES.items()
+    if fase not in ETAPA_POR_CHAVE or ETAPA_POR_CHAVE[fase].exclusiva
 }
 
-_PREREQUISITO = {
-    "coletada": None,
-    "extraida": "coletada",
-    "pcr_feito": "extraida",
+ETAPAS: tuple[str, ...] = tuple(e.chave for e in ETAPAS_DEF)
+
+# Rótulos e cores de TODAS as fases (etapas + virtuais), na ordem do fluxo.
+LABEL_FASE: dict[str, str] = {
+    FASE_PENDENTE: "Pendente",
+    **{e.chave: e.label for e in ETAPAS_DEF},
+    FASE_REJEITADA: "Rejeitada",
 }
+
+COR_FASE: dict[str, str] = {
+    FASE_PENDENTE: _COR_PENDENTE,
+    **{e.chave: e.cor for e in ETAPAS_DEF},
+    FASE_REJEITADA: _COR_REJEITADA,
+}
+
+_DATA_DE = {e.chave: e.coluna_data for e in ETAPAS_DEF}
+
+_PREREQUISITO = {e.chave: e.prerequisito for e in ETAPAS_DEF}
+
+
+def fase_da_linha(r) -> str:
+    """Fase "mais avançada" de uma linha — usada para o badge.
+
+    Fonte única da derivação em Python (app.py e export.py delegam aqui).
+    Rejeição vence tudo; depois vale a etapa mais avançada já marcada. Uma
+    amostra sequenciada exibe o badge 'Sequenciada' inclusive na aba PCR feito,
+    o que deixa visível de relance o que já seguiu para sequenciamento.
+    """
+    if r["rejeitada"]:
+        return FASE_REJEITADA
+    for etapa in reversed(ETAPAS_DEF):
+        if r[etapa.coluna]:
+            return etapa.chave
+    return FASE_PENDENTE
 
 MOTIVOS_REJEICAO = ("Volume Insuficiente", "Não Encontrada")
 
@@ -160,13 +331,42 @@ def conectar() -> _Conn:
 # --------------------------------------------------------------------------- #
 
 
-def _migrar(con: _Conn) -> None:
-    """Adiciona colunas novas a bancos pré-existentes (idempotente)."""
-    for coluna, tipo in _COLUNAS_MIGRACAO.items():
+def _colunas_existentes(con: _Conn, tabela: str = "amostras") -> set[str]:
+    """Nomes das colunas da tabela no schema corrente."""
+    return {
+        r["column_name"]
+        for r in con.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = %s AND table_schema = CURRENT_SCHEMA()",
+            (tabela,),
+        ).fetchall()
+    }
+
+
+def _migrar(con: _Conn, *, commit: bool = True) -> list[str]:
+    """Adiciona colunas novas a bancos pré-existentes (idempotente).
+
+    Consulta information_schema PRIMEIRO e só emite ALTER TABLE para o que
+    realmente falta. Em regime normal isso é ZERO ALTERs — apenas um SELECT
+    barato, sem lock. Essa é a diferença que permite chamar a migração no boot
+    sem repetir o incidente do commit ed5160a, onde o ALTER incondicional a cada
+    deploy pegava ACCESS EXCLUSIVE e travava a tabela sob deploys sobrepostos.
+
+    Returns:
+        Lista das colunas efetivamente adicionadas (vazia no caso comum).
+    """
+    existentes = _colunas_existentes(con)
+    faltando = [c for c in _COLUNAS_MIGRACAO if c not in existentes]
+    for coluna in faltando:
+        # ADD COLUMN com default constante é metadata-only no PG 11+ (não
+        # reescreve a tabela), logo o lock dura milissegundos.
         con.execute(
-            f"ALTER TABLE amostras ADD COLUMN IF NOT EXISTS {coluna} {tipo}"
+            f"ALTER TABLE amostras ADD COLUMN IF NOT EXISTS {coluna} "
+            f"{_COLUNAS_MIGRACAO[coluna]}"
         )
-    con.commit()
+    if commit:
+        con.commit()
+    return faltando
 
 
 def _reclassificar_2026(con: _Conn) -> int:
@@ -235,10 +435,10 @@ _SCHEMA_LOCK_ID = 728193
 def criar_schema(con: _Conn) -> None:
     """Cria tabelas e índices (idempotente), serializado por advisory lock.
 
-    NÃO roda _migrar: as colunas rejeitada/motivo_rejeicao/data_rejeicao já
-    estão no CREATE TABLE. Rodar ALTER TABLE a cada boot pegava um lock
-    ACCESS EXCLUSIVE que, sob deploys concorrentes, travava a tabela inteira.
-    _migrar fica disponível apenas para uso manual em bancos legados.
+    Roda _migrar DENTRO da mesma transação do advisory lock. Bancos já povoados
+    não recebem colunas novas via CREATE TABLE IF NOT EXISTS, então a migração é
+    necessária — mas só emite ALTER para o que falta (ver _migrar), o que a torna
+    um no-op silencioso em regime normal e evita o lock que motivou o ed5160a.
 
     Usa pg_advisory_xact_lock (escopo de transação) — serializa criação
     concorrente e é seguro com o pooler do Neon (PgBouncer em modo transação),
@@ -247,7 +447,10 @@ def criar_schema(con: _Conn) -> None:
     con.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_LOCK_ID,))
     for stmt in _SCHEMA:
         con.execute(stmt.strip())
-    con.commit()  # aplica o schema e libera o advisory lock
+    adicionadas = _migrar(con, commit=False)
+    con.commit()  # aplica schema + migração e libera o advisory lock
+    if adicionadas:
+        print(f"[schema] colunas adicionadas: {', '.join(adicionadas)}", flush=True)
     _reclassificar_2026(con)
 
 
@@ -312,7 +515,16 @@ def construir_filtro(
     busca_ni: Optional[str] = None,
     flags_qualquer: Optional[Iterable[str]] = None,
     com_flags: Optional[bool] = None,
+    sorotipo: Optional[str] = None,
+    com_resultado: Optional[bool] = None,
 ) -> tuple[Optional[str], list]:
+    """Monta (where, params) do filtro global.
+
+    Args:
+        sorotipo: 'DEN1'..'DEN4' para detectados, ou SOROTIPO_NAO_DETECTADO
+            para amostras com resultado gravado e nenhum Ct.
+        com_resultado: True/False para ter/não ter resultado gravado.
+    """
     clausulas: list[str] = []
     params: list = []
 
@@ -339,6 +551,20 @@ def construir_filtro(
         clausulas.append("flags != ''")
     elif com_flags is False:
         clausulas.append("flags = ''")
+
+    if sorotipo == SOROTIPO_NAO_DETECTADO:
+        # Resultado gravado, porém nenhum sorotipo detectado.
+        nenhum = " AND ".join(f"{c} IS NULL" for c in COLUNAS_CT)
+        clausulas.append(f"(data_resultado IS NOT NULL AND {nenhum})")
+    elif sorotipo:
+        if sorotipo not in SOROTIPOS:
+            raise ValueError(f"sorotipo inválido: {sorotipo!r} (use {list(SOROTIPOS)})")
+        clausulas.append(f"{coluna_ct(sorotipo)} IS NOT NULL")
+
+    if com_resultado is True:
+        clausulas.append("data_resultado IS NOT NULL")
+    elif com_resultado is False:
+        clausulas.append("data_resultado IS NULL")
 
     where = " AND ".join(clausulas) if clausulas else None
     return where, params
@@ -505,3 +731,72 @@ def contagens_por_fase(
 def _combinar_where(*clausulas: Optional[str]) -> Optional[str]:
     partes = [f"({c})" for c in clausulas if c]
     return " AND ".join(partes) if partes else None
+
+
+# --------------------------------------------------------------------------- #
+# Resultados de PCR (Ct por sorotipo)                                           #
+# --------------------------------------------------------------------------- #
+
+# Colunas necessárias para resolver NI -> chave e triar o import.
+_COLUNAS_INDICE = (
+    "chave", "prefixo", "numero_sequencial", "ano_verdade", "ni_original",
+    "pcr_feito", "sequenciado", "rejeitada", "data_resultado",
+)
+
+
+def indice_para_resultados(con: _Conn) -> list[dict]:
+    """Universo mínimo para resolver NIs do arquivo de resultados.
+
+    Uma query só (~5,5 mil linhas, barato) em vez de um SELECT por NI — contra o
+    Neon, N round-trips seriam o gargalo do import.
+    """
+    return [
+        dict(r)
+        for r in con.execute(
+            f"SELECT {', '.join(_COLUNAS_INDICE)} FROM amostras"
+        ).fetchall()
+    ]
+
+
+def gravar_resultados(con: _Conn, registros: Iterable[dict]) -> int:
+    """Grava Ct por sorotipo, sem jamais sobrescrever resultado existente.
+
+    Args:
+        registros: dicts com 'chave' + as colunas de COLUNAS_CT (valores None
+            para sorotipo não detectado).
+
+    Returns:
+        Quantidade de amostras efetivamente gravadas.
+
+    A cláusula `data_resultado IS NULL` é a guarda transacional contra
+    sobrescrita: mesmo que dois usuários importem em paralelo, o segundo não
+    sobrepõe o primeiro — e o rowcount devolvido reflete o que de fato mudou,
+    não o que se pretendia mudar.
+    """
+    registros = list(registros)
+    if not registros:
+        return 0
+
+    colunas = ", ".join(COLUNAS_CT)
+    sets = ", ".join(f"{c} = v.{c}" for c in COLUNAS_CT)
+    # Cast explícito: VALUES sem tipo chega como texto e o UPDATE falharia.
+    casts = ", ".join(["%s"] + ["%s::numeric"] * len(COLUNAS_CT))
+    sql = (
+        f"UPDATE amostras AS a SET {sets}, "
+        f"    data_resultado = CURRENT_TIMESTAMP, "
+        f"    atualizado_em = CURRENT_TIMESTAMP "
+        f"FROM (VALUES %s) AS v(chave, {colunas}) "
+        f"WHERE a.chave = v.chave AND a.data_resultado IS NULL"
+    )
+    tuplas = [
+        (r["chave"], *(r.get(c) for c in COLUNAS_CT)) for r in registros
+    ]
+    gravadas = con.executar_values(sql, tuplas, template=f"({casts})")
+
+    for r in registros:
+        valores = ";".join(
+            "" if r.get(c) is None else str(r[c]) for c in COLUNAS_CT
+        )
+        registrar_evento(con, r["chave"], "resultado_den", valores)
+    con.commit()
+    return gravadas

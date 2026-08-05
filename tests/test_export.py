@@ -50,6 +50,27 @@ class TestColunas:
         assert df.columns[0] == "NI"
         assert df.columns[1] == "Número"
 
+    def test_cabecalhos_estaveis(self, con):
+        """Trava de regressão: os cabeçalhos são derivados de db.ETAPAS_DEF, e
+        uma derivação ingênua renomearia 'Data PCR' para 'Data PCR feito',
+        quebrando planilhas já em uso na bancada."""
+        cabec = list(_df(con).columns)
+        for esperado in ("Coletada", "Data Coletada", "Extraída", "Data Extraída",
+                         "PCR feito", "Data PCR", "Rejeitada", "Flags"):
+            assert esperado in cabec, f"cabeçalho '{esperado}' sumiu do export"
+
+    def test_colunas_de_resultado(self, con):
+        cabec = list(_df(con).columns)
+        assert "Sequenciada" in cabec and "Data Sequenciada" in cabec
+        assert "Sorotipo" in cabec and "Data Resultado" in cabec
+        for s in db.SOROTIPOS:
+            assert f"{s} (Ct)" in cabec
+
+    def test_ct_ausente_nao_vira_texto_none(self, con):
+        """Ct nulo tem que sair como célula vazia, nunca como a string 'None'."""
+        df = _df(con)
+        assert not (df["DEN1 (Ct)"].astype(str) == "None").any()
+
 
 class TestConteudo:
     def test_ordenacao_canonica_preservada(self, con):

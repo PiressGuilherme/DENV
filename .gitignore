@@ -15,3 +15,6 @@ venv/
 # Exports gerados pela UI
 exports/
 *.tmp.xlsx
+
+# Planilhas de exemplo geradas por scripts/gerar_planilha_exemplo.py
+data/exemplos/

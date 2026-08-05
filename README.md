@@ -1,8 +1,18 @@
 # Reprocesso Dengue — LACEN-RS
 
 Tracker para controle do **reprocesso de amostras de dengue**. Acompanha cada
-amostra por um fluxo de três etapas — **Coletada → Extraída → PCR feito** — além de um
-estado terminal alternativo de **Rejeição** (volume insuficiente / não encontrada).
+amostra por um fluxo de quatro etapas — **Coletada → Extraída → PCR feito →
+Sequenciada** — além de um estado terminal alternativo de **Rejeição** (volume
+insuficiente / não encontrada).
+
+**Sequenciada é um subconjunto de PCR feito, não um sucessor:** a amostra enviada
+para sequenciamento continua listada na aba PCR feito, que é onde ficam os
+resultados da PCR. Por isso os cards de métrica não somam o total.
+
+A aba **PCR feito** também importa resultados de PCR de uma planilha
+(`NI, DEN1, DEN2, DEN3, DEN4`, valores de Ct), com prévia do que será gravado e
+do que foi ignorado antes de confirmar. Resultado já existente **nunca** é
+sobrescrito.
 
 Stack: **NiceGUI + PostgreSQL (Neon) + pandas**. Acesso via navegador com login por e-mail e senha.
 
@@ -20,9 +30,13 @@ DENV/
 │   ├── auth.py          # login por e-mail e senha (NiceGUI sessions)
 │   ├── parsing.py       # parse do Número Interno, ano-de-verdade, flags
 │   ├── importer.py      # xlsx -> dedup -> PostgreSQL (idempotente)
-│   ├── db.py            # schema, queries, fluxo de fases
+│   ├── db.py            # schema, queries, registro de etapas do fluxo
+│   ├── resultados.py    # import de resultados de PCR (Ct por sorotipo)
 │   ├── export.py        # export da visão atual em xlsx/csv
 │   └── app.py           # UI NiceGUI (abas por fase, filtros, lote, export)
+├── scripts/
+│   ├── seed_teste.py            # popula um banco de TESTE com dados realistas
+│   └── gerar_planilha_exemplo.py # planilha de exemplo p/ testar o import
 ├── tests/               # pytest (requer DATABASE_URL para testes de banco)
 ├── ESPECIFICACAO.md     # regras de negócio (referenciadas pelo código)
 ├── Dockerfile
@@ -160,8 +174,48 @@ export DATABASE_URL="postgresql://..."   # branch dev do Neon
 pytest -q
 ```
 
-Sem `DATABASE_URL`, os 50 testes de parsing rodam normalmente; os 75 testes de
-banco são pulados (`skipped`) com a mensagem `DATABASE_URL não configurado`.
+Sem `DATABASE_URL`, os testes puros (parsing, triagem de resultados) rodam
+normalmente; os de banco são pulados (`skipped`) com a mensagem
+`DATABASE_URL não configurado`.
+
+> **Nunca aponte os testes nem os scripts para o banco de produção.** As
+> fixtures criam e destroem schemas, e `scripts/seed_teste.py` grava dados.
+
+### Banco de teste descartável (recomendado)
+
+Um PostgreSQL em container, isolado da produção:
+
+```bash
+docker run -d --name denv-test-pg \
+  -e POSTGRES_PASSWORD=test -e POSTGRES_DB=denv_test \
+  -p 55432:5432 postgres:16-alpine
+
+export DATABASE_URL="postgresql://postgres:test@127.0.0.1:55432/denv_test"
+pytest -q
+```
+
+Para descartar tudo: `docker rm -f denv-test-pg`.
+
+### Experimentar o fluxo com dados realistas
+
+```bash
+export DATABASE_URL="postgresql://postgres:test@127.0.0.1:55432/denv_test"
+
+# Importa a planilha de origem e avança um lote até PCR feito / Sequenciado.
+# Recusa-se a rodar se o banco já tiver progresso marcado (proteção anti-produção).
+python -m scripts.seed_teste
+
+# Gera planilhas de exemplo (xlsx + csv) em data/exemplos/, usando NIs REAIS
+# do banco — com NI inventado o import só exercitaria o caminho de erro.
+python -m scripts.gerar_planilha_exemplo --n 30
+python -m scripts.gerar_planilha_exemplo --n 30 --com-problemas
+
+python -m src.app   # aba "PCR feito" > botão "Importar resultados"
+```
+
+A variante `--com-problemas` inclui de propósito uma linha para cada motivo de
+exclusão (NI não encontrado, NI inválido, fora de fase, Ct inválido, duplicata…),
+para conferir o relatório de prévia antes de gravar.
 
 ---
 
@@ -193,3 +247,5 @@ tirar o estado atual:
 - **Porta local**: padrão 8080. Para mudar: variável `PORT` ou ajuste em `src/app.py`.
 - **Autenticação**: ativada automaticamente quando `APP_EMAIL` e `APP_PASS` estão definidos.
   Localmente (sem essas variáveis), o acesso é direto.
+
+
