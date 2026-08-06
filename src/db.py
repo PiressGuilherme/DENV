@@ -223,6 +223,7 @@ _SCHEMA = [
         den2_ct             NUMERIC(6,2),
         den3_ct             NUMERIC(6,2),
         den4_ct             NUMERIC(6,2),
+        ci_ct               NUMERIC(6,2),
         data_resultado      TIMESTAMP,
         n_origem            INTEGER NOT NULL DEFAULT 1,
         flags               TEXT DEFAULT '',
