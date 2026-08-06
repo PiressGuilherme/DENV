@@ -78,8 +78,11 @@ def _como_data(valor) -> Optional[datetime]:
         return valor
     if isinstance(valor, date):
         return datetime(valor.year, valor.month, valor.day)
-    # pandas Timestamp ou string -> tentar converter
-    ts = pd.to_datetime(valor, errors="coerce")
+    # pandas Timestamp ou string -> tentar converter.
+    # dayfirst=True é obrigatório: as datas do GAL são dd/mm/aa, e sem ele o
+    # pandas lê '03/04/26' como 4 de março em vez de 3 de abril. Só afeta datas
+    # em TEXTO — planilhas com datetime real saem antes, no isinstance acima.
+    ts = pd.to_datetime(valor, errors="coerce", dayfirst=True)
     if pd.isna(ts):
         return None
     return ts.to_pydatetime()

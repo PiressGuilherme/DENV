@@ -1,16 +1,16 @@
-"""Consolida data1/data2/data3 (exports do GAL) numa planilha única de dengue.
+"""Consolida data1/data2/data3 (exports do GAL) em planilhas prontas para import.
 
 Os três CSVs compartilham o mesmo schema do GAL (110 colunas, `;`, ISO-8859-1),
 mas NÃO são fatias disjuntas: data1∩data3 e data2∩data3 se sobrepõem, e a
 granularidade é uma linha por EXAME, não por amostra (NS1, IgM e ZDC viram três
 linhas do mesmo Número Interno).
 
-Este script empilha os três, mantém só amostras de dengue (NI começando com D) e
-colapsa para UMA linha por Número Interno. Os campos de identificação (paciente,
-município, datas de coleta/sintomas) são constantes dentro de uma amostra, então
-podem vir de qualquer linha; já os campos de resultado variam por exame — por
-isso cada exame é preservado em colunas próprias (ver _COLUNAS_EXAME) em vez de
-escolher uma linha e descartar as demais, o que perderia o resultado da PCR.
+Este script empilha os três, mantém só amostras de dengue (prefixo D) e colapsa
+para UMA linha por amostra, preferindo a linha da PCR (ZDC). Gera dois arquivos:
+
+    dengue_consolidado.xlsx            acervo total
+    dengue_consolidado_pendentes.xlsx  sem as amostras que já fizeram PCR
+                                       — é esta que vai para o sistema
 
 Uso:
     python -m scripts.merge_data
@@ -29,11 +29,55 @@ from src.parsing import ano_verdade, montar_chave, parse_ni
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 ARQUIVOS = ("data1.csv", "data2.csv", "data3.csv")
-SAIDA = DATA / "dengue_consolidado.xlsx"
+SAIDA_TOTAL = DATA / "dengue_consolidado.xlsx"
+SAIDA_PENDENTES = DATA / "dengue_consolidado_pendentes.xlsx"
+
+# O importador lê a aba por nome fixo (importer.ABA) — divergir daqui faz o
+# import falhar antes de ler a primeira linha.
+ABA = "dengue_coleta_dentro_prazo_mun_"
 
 COL_NI = "Número Interno"
 COL_SINTOMAS = "Data do 1º Sintomas"
 COL_COLETA = "Data da Coleta"
+COL_EXAME = "Exame"
+COL_STATUS = "Status Exame"
+COL_KIT = "Kit"
+
+EXAME_PCR = "Pesquisa de Arbovírus (ZDC)"
+
+# Status que indicam PCR concluída no GAL.
+_STATUS_CONCLUIDO = frozenset({"Resultado Liberado", "Resultado Cadastrado"})
+
+# Colunas mantidas na saída. O importador usa só 6 (ver importer.COL_*), mas as
+# demais dão contexto para conferência humana. Ficam de fora os campos de
+# identificação pessoal (CNS, CPF, nome, endereço, telefone, nome da mãe) e os
+# blocos de Sinan/Gal e tratamento/vacina — nada disso é usado pelo sistema e
+# manter reduz exposição de dado sensível.
+COLUNAS_SAIDA = (
+    "Requisição",
+    COL_NI,
+    COL_SINTOMAS,
+    COL_COLETA,
+    "Municipio de Residência",
+    "Unidade Solicitante",
+    "Caso",
+    COL_EXAME,
+    "Metodologia",
+    COL_STATUS,
+    COL_KIT,
+    "Fabricante",
+    "Data do Processamento",
+    "Data da Liberação",
+    "1º Campo Resultado",
+    "2º Campo Resultado",
+    "3º Campo Resultado",
+    "4º Campo Resultado",
+    "5º Campo Resultado",
+    "6º Campo Resultado",
+)
+
+# Colunas gravadas como datetime real (não texto) — ver _escrever.
+COLUNAS_DATA = (COL_SINTOMAS, COL_COLETA, "Data do Processamento", "Data da Liberação")
 
 # Prioridade de exame ao escolher a linha sobrevivente de cada amostra.
 # A PCR (ZDC) vem primeiro: é o exame que o sistema de reprocesso acompanha,
@@ -70,7 +114,12 @@ def _ler(caminho: Path) -> pd.DataFrame:
 
 
 def _data(valor: str):
-    """Converte as datas do GAL (dd/mm/aa ou dd-mm-aaaa) em datetime."""
+    """Converte as datas do GAL em datetime.
+
+    O GAL mistura dois formatos na MESMA coluna ('26-04-2026' e '26/04/26'), por
+    isso os formatos são testados explicitamente, todos dia-primeiro. Deixar o
+    pandas inferir leria '03/04/26' como 4 de março em vez de 3 de abril.
+    """
     texto = str(valor).strip()
     if not texto:
         return None
@@ -80,6 +129,28 @@ def _data(valor: str):
         except ValueError:
             continue
     return None
+
+
+def ja_fez_pcr(linha) -> bool:
+    """True se a amostra já passou pela PCR, pelos sinais do GAL.
+
+    Dois sinais independentes, unidos por OR porque cada um sozinho perde casos
+    reais (verificado nos dados: 7 divergências em 5.772 registros ZDC):
+
+    - Status concluído sem Kit (2 casos): PCR feita, kit não preenchido no GAL —
+      têm data de processamento/liberação e resultado real.
+    - Kit preenchido com exame cancelado (5 casos): o kit foi consumido, ou seja,
+      a amostra passou pela bancada e o exame foi cancelado depois.
+
+    Só vale para a linha de PCR: um kit registrado numa linha de NS1/IgM não diz
+    nada sobre a PCR.
+    """
+    if str(linha[COL_EXAME]).strip() != EXAME_PCR:
+        return False
+    return (
+        str(linha[COL_STATUS]).strip() in _STATUS_CONCLUIDO
+        or str(linha[COL_KIT]).strip() != ""
+    )
 
 
 def resolver_ni(ni_bruto: str, data_coleta_bruta: str) -> Optional[dict]:
@@ -138,17 +209,24 @@ def consolidar(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _escrever(df: pd.DataFrame, destino: Path) -> None:
-    """Grava o xlsx com formatação legível.
+    """Grava o xlsx com datas reais e formatação legível.
 
-    O default do openpyxl é Calibri 11 sem larguras definidas, o que deixa a
-    planilha com aparência de texto cru. Aqui o corpo usa Arial (mesma fonte da
-    planilha de origem do projeto), o cabeçalho fica em negrito congelado e as
-    colunas ganham largura proporcional ao conteúdo.
+    As colunas de data viram datetime de verdade (não texto): é o que a planilha
+    antiga fazia e o que evita que o importador precise adivinhar dia/mês. O
+    default do openpyxl seria Calibri 11 sem larguras, o que deixa a planilha com
+    aparência de texto cru — aqui o corpo usa Arial (mesma fonte da planilha de
+    origem do projeto), o cabeçalho fica em negrito congelado e as colunas ganham
+    largura proporcional ao conteúdo.
     """
     from openpyxl.styles import Alignment, Font
     from openpyxl.utils import get_column_letter
 
-    df.to_excel(destino, index=False, engine="openpyxl")
+    df = df.copy()
+    for col in COLUNAS_DATA:
+        if col in df.columns:
+            df[col] = df[col].map(_data)
+
+    df.to_excel(destino, index=False, engine="openpyxl", sheet_name=ABA)
 
     wb = load_workbook(destino)
     ws = wb.active
@@ -160,15 +238,23 @@ def _escrever(df: pd.DataFrame, destino: Path) -> None:
         celula.font = cabecalho
         celula.alignment = Alignment(horizontal="center", vertical="center")
 
+    colunas_data = {
+        i for i, nome in enumerate(df.columns, start=1) if nome in COLUNAS_DATA
+    }
     for linha in ws.iter_rows(min_row=2):
         for celula in linha:
             celula.font = corpo
+            if celula.column in colunas_data:
+                celula.number_format = "DD/MM/YYYY"
 
     # Largura pelo maior conteúdo real da coluna, com teto para não estourar a
-    # tela por causa de campos livres como Observação.
+    # tela por causa de campos de texto livre.
     for i, nome in enumerate(df.columns, start=1):
-        maior = int(df[nome].astype(str).str.len().max() or 0)
-        largura = max(len(str(nome)), min(maior, 40)) + 2
+        if i in colunas_data:
+            largura = max(len(str(nome)), 10) + 2
+        else:
+            maior = int(df[nome].astype(str).str.len().max() or 0)
+            largura = max(len(str(nome)), min(maior, 40)) + 2
         ws.column_dimensions[get_column_letter(i)].width = largura
 
     ws.freeze_panes = "A2"
@@ -201,7 +287,7 @@ def main() -> None:
     print(f"[3] Removidas {antes - len(df)} linhas idênticas (sobreposição)")
 
     final = consolidar(df)
-    n_pcr = (final["Exame"] == "Pesquisa de Arbovírus (ZDC)").sum()
+    n_pcr = (final[COL_EXAME] == EXAME_PCR).sum()
     print(f"[4] Consolidado: {len(final)} amostras únicas ({n_pcr} com linha de PCR)")
 
     # Ordenação canônica da Seção 3.3: ano_verdade, prefixo, numero_sequencial.
@@ -213,18 +299,23 @@ def main() -> None:
         ["_ano", "_prefixo", "_numero"], kind="stable"
     ).reset_index(drop=True)
 
-    # Volta ao layout original do GAL: só as colunas do export, sem auxiliares.
-    final = final[[c for c in final.columns if not c.startswith("_")]]
+    # Recorta para o perfil de colunas (COLUNAS_SAIDA já traz Sintomas e Coleta
+    # lado a lado, logo após o Número Interno).
+    final = final[list(COLUNAS_SAIDA)]
 
-    # Datas de sintomas e coleta lado a lado, logo após o Número Interno.
-    cols = [c for c in final.columns if c not in (COL_SINTOMAS, COL_COLETA)]
-    i = cols.index(COL_NI) + 1
-    cols[i:i] = [COL_SINTOMAS, COL_COLETA]
-    final = final[cols]
-
-    _escrever(final, SAIDA)
-    print(f"[5] Planilha gerada: {SAIDA}")
+    _escrever(final, SAIDA_TOTAL)
+    print(f"[5] Planilha total: {SAIDA_TOTAL.name}")
     print(f"    {len(final)} linhas x {len(final.columns)} colunas")
+
+    # A planilha de import exclui quem já passou pela PCR. O filtro vem por
+    # último, sobre o dataset já consolidado e ordenado, para que os dois
+    # arquivos sejam idênticos linha a linha exceto pelas removidas.
+    fez_pcr = final.apply(ja_fez_pcr, axis=1)
+    pendentes = final[~fez_pcr].reset_index(drop=True)
+
+    _escrever(pendentes, SAIDA_PENDENTES)
+    print(f"[6] Planilha de importação: {SAIDA_PENDENTES.name}")
+    print(f"    {len(pendentes)} linhas ({int(fez_pcr.sum())} já fizeram PCR, removidas)")
 
 
 if __name__ == "__main__":

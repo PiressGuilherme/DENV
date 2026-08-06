@@ -18,3 +18,11 @@ exports/
 
 # Planilhas de exemplo geradas por scripts/gerar_planilha_exemplo.py
 data/exemplos/
+
+# Exports do GAL e planilhas consolidadas — contêm dados de paciente.
+# O que reproduz esses arquivos é o scripts/merge_data.py, não os dados.
+data/*.csv
+data/dengue_consolidado*.xlsx
+
+# Arquivos de lock do LibreOffice
+.~lock.*#
