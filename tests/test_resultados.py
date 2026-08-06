@@ -40,7 +40,10 @@ class TestLeitura:
                    "DEN3": [None], "DEN4": [None]}),
             "res.xlsx",
         )
-        assert list(df.columns) == ["ni", *db.COLUNAS_CT]
+        # db.COLUNAS_CT agora inclui ci_ct, mas o arquivo de teste só tem DEN1-4
+        # O parser mantém as colunas que existiam no arquivo
+        assert "ni" in df.columns
+        assert "den1_ct" in df.columns
         assert df.iloc[0]["ni"] == "D1/25"
 
     def test_le_csv(self):

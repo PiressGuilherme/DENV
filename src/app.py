@@ -35,7 +35,7 @@ from typing import Optional
 from nicegui import app as _nicegui_app
 from nicegui import ui
 
-from src import auth, db, export, resultados
+from src import auth, db, export, resultados, parser_termociclador
 
 
 def _startup_db() -> None:
@@ -223,6 +223,11 @@ class FaseTab:
                     icon="upload_file",
                     on_click=self.app.abrir_dialogo_resultados,
                 ).props("color=secondary outline")
+                ui.button(
+                    "Importar do Termociclador",
+                    icon="biotech",
+                    on_click=self.app.abrir_dialogo_termociclador,
+                ).props("color=primary outline")
             # Reverter: só na aba Rejeitadas (volta a Pendente).
             if self.fase == db.FASE_REJEITADA:
                 ui.button(
@@ -483,6 +488,290 @@ class App:
 
             self._rodape_fechar(rodape, dialogo)
         dialogo.open()
+
+    # -- import de resultados do termociclador ----------------------------- #
+    def abrir_dialogo_termociclador(self) -> None:
+        """Diálogo de import de resultados do termociclador (2 arquivos: 1-4 e 2-3)."""
+        # Estado local do diálogo
+        estado = {
+            "arquivo_1_4": None,      # (nome, bytes)
+            "arquivo_2_3": None,      # (nome, bytes)
+            "resultado_parse": None,  # ResultadoParseTermociclador merged
+            "ano_definido": None,     # ano informado pelo usuário
+            "conflitos": None,        # lista de ConflitoCampo
+            "resolvidas": None,       # dict {chave: cts}
+            "nao_encontradas": None,  # lista
+            "ano_ambiguo": None,      # lista
+        }
+
+        with ui.dialog() as dialogo, ui.card().classes("w-[52rem]"):
+            with ui.row().classes("w-full items-center no-wrap"):
+                ui.label("Importar do Termociclador").classes("text-bold text-lg")
+                ui.space()
+                ui.button(icon="close", on_click=dialogo.close).props("flat round dense")
+            
+            ui.label(
+                "Selecione os dois arquivos de corrida: "
+                "<b>Dengue 1-4</b> (FAM=DEN4, VIC=DEN1, Cy5=CI) e "
+                "<b>Dengue 2-3</b> (FAM=DEN2, VIC=DEN3, Cy5=CI). "
+                "Amostras com Sample Type ≠ 'Unknown' (controles CN/CP) são ignoradas."
+            ).classes("text-grey-7 text-sm")
+
+            # Área de upload dos dois arquivos
+            with ui.row().classes("w-full gap-4 q-mt-md"):
+                # Arquivo 1-4
+                with ui.column().classes("w-1/2"):
+                    ui.label("Dengue 1-4").classes("text-bold")
+                    self._upload_arquivo_termociclador(
+                        estado, "arquivo_1_4", "1-4",
+                        lambda: self._processar_termociclador(estado, dialogo, area_previa, rodape)
+                    )
+                
+                # Arquivo 2-3
+                with ui.column().classes("w-1/2"):
+                    ui.label("Dengue 2-3").classes("text-bold")
+                    self._upload_arquivo_termociclador(
+                        estado, "arquivo_2_3", "2-3",
+                        lambda: self._processar_termociclador(estado, dialogo, area_previa, rodape)
+                    )
+
+            # Área de prévia (preenchida após processar)
+            area_previa = ui.column().classes("w-full q-mt-md")
+            
+            # Rodapé com ações
+            rodape = ui.row().classes("w-full justify-end gap-2 q-mt-md")
+            self._rodape_fechar(rodape, dialogo)
+
+        dialogo.open()
+
+    def _upload_arquivo_termociclador(self, estado: dict, chave_estado: str, label: str, callback) -> None:
+        """Cria widget de upload para um arquivo do termociclador."""
+        def ao_subir(evento):
+            conteudo = evento.file.read()
+            estado[chave_estado] = (evento.file.name, conteudo)
+            ui.notify(f"{label}: {evento.file.name} carregado", type="positive")
+            # Se já temos os dois arquivos, processa automaticamente
+            if estado["arquivo_1_4"] and estado["arquivo_2_3"]:
+                callback()
+        
+        ui.upload(
+            on_upload=ao_subir,
+            max_files=1,
+            auto_upload=True,
+            label=f"Selecione Dengue {label}",
+        ).props('accept=".xlsx,.xlsm"').classes("w-full")
+
+    def _processar_termociclador(self, estado: dict, dialogo, area_previa, rodape) -> None:
+        """Processa os dois arquivos e mostra prévia ou pede ano."""
+        area_previa.clear()
+        rodape.clear()
+        self._rodape_fechar(rodape, dialogo)
+
+        try:
+            # Parse arquivo 1-4
+            nome_1_4, conteudo_1_4 = estado["arquivo_1_4"]
+            r1 = parser_termociclador.parse_arquivo_termociclador(conteudo_1_4, nome_1_4)
+            
+            # Parse arquivo 2-3
+            nome_2_3, conteudo_2_3 = estado["arquivo_2_3"]
+            r2 = parser_termociclador.parse_arquivo_termociclador(conteudo_2_3, nome_2_3)
+            
+            # Merge
+            merged = parser_termociclador.merge_arquivos_termociclador(r1, r2)
+            
+            if merged.erros:
+                ui.notify("; ".join(merged.erros), type="negative", timeout=10000)
+                return
+            
+            estado["resultado_parse"] = merged
+            
+            # Se há sample IDs sem ano, pede o ano
+            if merged.sample_ids_sem_ano:
+                self._pedir_ano_termociclador(estado, dialogo, area_previa, rodape, merged.sample_ids_sem_ano)
+            else:
+                # Resolve direto no banco
+                self._resolver_e_mostrar_previa(estado, dialogo, area_previa, rodape, None)
+        
+        except Exception as e:
+            ui.notify(f"Erro ao processar arquivos: {e}", type="negative", timeout=10000)
+
+    def _pedir_ano_termociclador(self, estado: dict, dialogo, area_previa, rodape, sample_ids_sem_ano: list[str]) -> None:
+        """Mostra diálogo para informar o ano das amostras sem ano no Sample ID."""
+        with area_previa:
+            ui.label(f"⚠️ {len(sample_ids_sem_ano)} amostra(s) não têm ano no Sample ID:").classes("text-orange-8 text-bold")
+            with ui.row().classes("w-full gap-2 flex-wrap"):
+                for sid in sample_ids_sem_ano[:20]:
+                    ui.chip(sid).classes("bg-grey-2")
+                if len(sample_ids_sem_ano) > 20:
+                    ui.label(f"... e mais {len(sample_ids_sem_ano) - 20}").classes("text-grey-6")
+            
+            ui.separator().classes("q-my-md")
+            ui.label("Informe o ano de coleta para estas amostras:").classes("text-grey-7")
+            
+            ano_input = ui.number("Ano", value=2025, min=2020, max=2030).props("dense").classes("w-32")
+            
+            with ui.row().classes("w-full justify-end gap-2 q-mt-md"):
+                ui.button("Cancelar", on_click=dialogo.close).props("flat")
+                ui.button(
+                    "Continuar", icon="arrow_forward",
+                    on_click=lambda: self._resolver_e_mostrar_previa(
+                        estado, dialogo, area_previa, rodape, ano_input.value
+                    ),
+                ).props("color=primary")
+        
+        self._rodape_fechar(rodape, dialogo)
+
+    def _resolver_e_mostrar_previa(self, estado: dict, dialogo, area_previa, rodape, ano_padrao: Optional[int]) -> None:
+        """Resolve amostras no banco e mostra prévia com conflitos."""
+        area_previa.clear()
+        rodape.clear()
+        self._rodape_fechar(rodape, dialogo)
+
+        try:
+            # Prepara dados para gravação
+            dados_gravacao = parser_termociclador.preparar_para_gravacao(
+                estado["resultado_parse"], ano_padrao
+            )
+            
+            # Resolve no banco
+            resolvidas, nao_encontradas, ano_ambiguo = db.resolver_amostras_termociclador(
+                self.con, dados_gravacao
+            )
+            
+            estado["resolvidas"] = resolvidas
+            estado["nao_encontradas"] = nao_encontradas
+            estado["ano_ambiguo"] = ano_ambiguo
+            
+            # Mostra prévia
+            self._render_previa_termociclador(estado, dialogo, area_previa, rodape)
+        
+        except Exception as e:
+            ui.notify(f"Erro ao resolver amostras: {e}", type="negative", timeout=10000)
+
+    def _render_previa_termociclador(self, estado: dict, dialogo, area_previa, rodape) -> None:
+        """Renderiza a prévia do import do termociclador com conflitos."""
+        resolvidas = estado["resolvidas"]
+        nao_encontradas = estado["nao_encontradas"]
+        ano_ambiguo = estado["ano_ambiguo"]
+        
+        with area_previa:
+            # Resumo
+            with ui.row().classes("items-center gap-4 q-mt-sm"):
+                ui.label(f"✅ {len(resolvidas)} amostra(s) encontradas no banco").classes("text-positive text-bold")
+                if nao_encontradas:
+                    ui.label(f"❌ {len(nao_encontradas)} não encontrada(s)").classes("text-negative")
+                if ano_ambiguo:
+                    ui.label(f"⚠️ {len(ano_ambiguo)} com ano ambíguo").classes("text-orange-8")
+            
+            if not resolvidas:
+                ui.label("Nenhuma amostra para gravar.").classes("text-grey-6")
+                self._rodape_fechar(rodape, dialogo)
+                return
+            
+            # Busca valores atuais no banco para detectar conflitos
+            chaves = list(resolvidas.keys())
+            ph = db._placeholders(len(chaves))
+            rows_atuais = self.con.execute(
+                f"SELECT chave, {', '.join(db.COLUNAS_CT)} FROM amostras WHERE chave IN ({ph})",
+                chaves,
+            ).fetchall()
+            
+            atuais_por_chave = {r["chave"]: r for r in rows_atuais}
+            
+            # Detecta conflitos
+            conflitos = []
+            for chave, cts_novos in resolvidas.items():
+                atuais = atuais_por_chave.get(chave, {})
+                for campo in db.COLUNAS_CT:
+                    valor_novo = cts_novos.get(campo)
+                    valor_atual = atuais.get(campo) if atuais else None
+                    
+                    if valor_novo is not None and valor_atual is not None and valor_atual != valor_novo:
+                        conflitos.append({
+                            "chave": chave,
+                            "campo": campo,
+                            "valor_atual": valor_atual,
+                            "valor_novo": valor_novo,
+                        })
+            
+            estado["conflitos"] = conflitos
+            
+            # Mostra conflitos com checkboxes
+            if conflitos:
+                ui.label(f"⚠️ {len(conflitos)} conflito(s) de valor detectado(s):").classes("text-orange-8 text-bold q-mt-md")
+                ui.label("Marque os campos que deseja sobrescrever:").classes("text-grey-7")
+                
+                checkboxes = {}  # (chave, campo) -> ui.checkbox
+                
+                with ui.column().classes("w-full q-mt-sm"):
+                    for i, conf in enumerate(conflitos):
+                        with ui.row().classes("items-center gap-2"):
+                            cb = ui.checkbox(
+                                f"{conf['chave']} · {conf['campo'].upper()}: "
+                                f"atual={conf['valor_atual']:.1f} → novo={conf['valor_novo']:.1f}"
+                            ).props("dense")
+                            checkboxes[(conf['chave'], conf['campo'])] = cb
+                
+                estado["checkboxes_conflitos"] = checkboxes
+            
+            # Ações
+            with rodape:
+                if conflitos:
+                    ui.button(
+                        "Sobrescrever marcados e gravar", icon="save",
+                        on_click=lambda: self._confirmar_gravacao_termociclador(
+                            estado, dialogo, checkboxes
+                        ),
+                    ).props("color=primary")
+                    ui.button("Gravar apenas sem conflitos", icon="save",
+                        on_click=lambda: self._confirmar_gravacao_termociclador(
+                            estado, dialogo, {}
+                        ),
+                    ).props("color=secondary outline")
+                else:
+                    ui.button(
+                        f"Gravar {len(resolvidas)} amostra(s)", icon="save",
+                        on_click=lambda: self._confirmar_gravacao_termociclador(
+                            estado, dialogo, {}
+                        ),
+                    ).props("color=primary")
+                
+                ui.button("Cancelar", on_click=dialogo.close).props("flat")
+        
+        self._rodape_fechar(rodape, dialogo)
+
+    def _confirmar_gravacao_termociclador(self, estado: dict, dialogo, checkboxes: dict) -> None:
+        """Confirma a gravação dos resultados do termociclador."""
+        # Coleta quais conflitos o usuário marcou para sobrescrever
+        sobrescrever = set()
+        for (chave, campo), cb in checkboxes.items():
+            if cb.value:
+                sobrescrever.add((chave, campo))
+        
+        try:
+            resultado = db.gravar_resultados_termociclador(
+                self.con,
+                estado["resolvidas"],
+                sobrescrever=sobrescrever if sobrescrever else None,
+            )
+            
+            dialogo.close()
+            
+            # Monta mensagem de resultado
+            msgs = []
+            msgs.append(f"✅ {resultado.gravados} amostra(s) atualizada(s) ({resultado.campos_gravados} campo(s))")
+            if resultado.conflitos:
+                msgs.append(f"⚠️ {len(resultado.conflitos)} conflito(s) não autorizado(s) — não gravados")
+            if resultado.nao_encontradas:
+                msgs.append(f"❌ {len(resultado.nao_encontradas)} não encontrada(s) no banco")
+            if resultado.ano_ambiguo:
+                msgs.append(f"⚠️ {len(resultado.ano_ambiguo)} com ano ambíguo")
+            
+            ui.notify(" | ".join(msgs), type="positive" if resultado.gravados > 0 else "warning", timeout=10000)
+            self.refresh()
+        
+        except Exception as e:
+            ui.notify(f"Falha ao gravar: {e}", type="negative", timeout=10000)
 
     def _rodape_fechar(self, rodape, dialogo) -> None:
         rodape.clear()

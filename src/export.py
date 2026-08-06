@@ -29,8 +29,12 @@ _COLUNAS_ETAPAS: tuple[tuple[str, str], ...] = tuple(
 )
 
 # Ct por sorotipo, também derivado (db.SOROTIPOS).
+# CI (Controle Interno) é tratado separadamente para aparecer no final
 _COLUNAS_CT: tuple[tuple[str, str], ...] = tuple(
-    (db.coluna_ct(s), f"{s} (Ct)") for s in db.SOROTIPOS
+    (db.coluna_ct(s), f"{s} (Ct)") for s in ("DEN1", "DEN2", "DEN3", "DEN4")
+)
+_COLUNA_CI: tuple[tuple[str, str], ...] = (
+    (db.coluna_ct("CI"), "CI (Ct)"),
 )
 
 # Colunas exportadas, na ordem de exibição. (campo_no_banco, cabeçalho PT-BR).
@@ -50,6 +54,7 @@ COLUNAS_EXPORT: Sequence[tuple[str, str]] = (
     ("data_rejeicao", "Data Rejeição"),
     ("sorotipo", "Sorotipo"),
     *_COLUNAS_CT,
+    *_COLUNA_CI,
     ("data_resultado", "Data Resultado"),
     ("flags", "Flags"),
     ("n_origem", "Nº origem"),

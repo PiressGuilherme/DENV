@@ -151,7 +151,7 @@ _COR_REJEITADA = "#e53935"
 # `data_resultado` é o que define "já tem resultado" de forma inequívoca: um Ct
 # nulo sozinho é ambíguo (pode ser negativo OU nunca preenchido).
 
-SOROTIPOS: tuple[str, ...] = ("DEN1", "DEN2", "DEN3", "DEN4")
+SOROTIPOS: tuple[str, ...] = ("DEN1", "DEN2", "DEN3", "DEN4", "CI")
 
 # Opção de filtro para "tem resultado, mas nenhum sorotipo detectado".
 SOROTIPO_NAO_DETECTADO = "__nd__"
@@ -800,3 +800,192 @@ def gravar_resultados(con: _Conn, registros: Iterable[dict]) -> int:
         registrar_evento(con, r["chave"], "resultado_den", valores)
     con.commit()
     return gravadas
+
+
+# --------------------------------------------------------------------------- #
+# Resultados do Termociclador (import por campo com conflitos)                  #
+# --------------------------------------------------------------------------- #
+
+from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass
+class ConflitoCampo:
+    """Representa um conflito de valor em um campo específico."""
+    chave: str
+    campo: str
+    valor_atual: Optional[float]
+    valor_novo: Optional[float]
+
+
+@dataclass
+class ResultadoGravacaoTermociclador:
+    """Resultado da gravação de resultados do termociclador."""
+    gravados: int = 0           # número de amostras com pelo menos um campo gravado
+    campos_gravados: int = 0    # total de campos individuais gravados
+    conflitos: list[ConflitoCampo] = None  # campos com valor_atual != valor_novo (não-None)
+    nao_encontradas: list[str] = None      # chaves que não existem no banco
+    ano_ambiguo: list[str] = None          # sample IDs que casam com múltiplos anos
+
+    def __post_init__(self):
+        if self.conflitos is None:
+            self.conflitos = []
+        if self.nao_encontradas is None:
+            self.nao_encontradas = []
+        if self.ano_ambiguo is None:
+            self.ano_ambiguo = []
+
+
+def resolver_amostras_termociclador(
+    con: _Conn,
+    amostras_termociclador: list[dict],
+) -> tuple[dict[str, dict], list[str], list[str]]:
+    """
+    Resolve amostras do termociclador para chaves do banco.
+
+    Args:
+        con: conexão com o banco
+        amostras_termociclador: lista de dicts com chaves:
+            - prefixo (str, default "D")
+            - numero_sequencial (int)
+            - ano_verdade (int, opcional)
+            - cts: dict com den1_ct, den2_ct, den3_ct, den4_ct, ci_ct
+
+    Returns:
+        Tupla (amostras_resolvidas, nao_encontradas, ano_ambiguo)
+        - amostras_resolvidas: dict {chave_banco: dict_com_cts}
+        - nao_encontradas: lista de sample_ids que não casaram com nada
+        - ano_ambiguo: lista de sample_ids que casaram com múltiplos anos
+    """
+    # Busca todas as amostras candidatas do banco (prefixo D)
+    rows = con.execute(
+        "SELECT chave, prefixo, numero_sequencial, ano_verdade "
+        "FROM amostras WHERE prefixo = %s",
+        ("D",),
+    ).fetchall()
+
+    # Índice por (prefixo, numero_sequencial) -> lista de chaves (pode ter vários anos)
+    por_numero: dict[tuple[str, int], list[dict]] = {}
+    por_chave: dict[str, dict] = {}
+    for r in rows:
+        key = (r["prefixo"], r["numero_sequencial"])
+        por_numero.setdefault(key, []).append(r)
+        por_chave[r["chave"]] = r
+
+    resolvidas = {}
+    nao_encontradas = []
+    ano_ambiguo = []
+
+    for amp in amostras_termociclador:
+        prefixo = amp.get("prefixo", "D")
+        numero = amp["numero_sequencial"]
+        ano = amp.get("ano_verdade")
+        cts = amp["cts"]
+
+        sample_id = f"{prefixo}{numero}" + (f"/{ano % 100:02d}" if ano else "")
+
+        if ano is not None:
+            # Busca exata pela chave completa
+            chave_esperada = f"{prefixo}{numero}/{ano % 100:02d}"
+            if chave_esperada in por_chave:
+                resolvidas[chave_esperada] = cts
+            else:
+                nao_encontradas.append(sample_id)
+        else:
+            # Busca por prefixo + numero (pode retornar múltiplos anos)
+            candidatos = por_numero.get((prefixo, numero), [])
+            if not candidatos:
+                nao_encontradas.append(sample_id)
+            elif len(candidatos) == 1:
+                resolvidas[candidatos[0]["chave"]] = cts
+            else:
+                # Múltiplos anos para o mesmo número - ambíguo
+                ano_ambiguo.append(sample_id)
+
+    return resolvidas, nao_encontradas, ano_ambiguo
+
+
+def gravar_resultados_termociclador(
+    con: _Conn,
+    amostras_resolvidas: dict[str, dict],
+    sobrescrever: Optional[set[tuple[str, str]]] = None,
+) -> ResultadoGravacaoTermociclador:
+    """
+    Grava resultados do termociclador por campo, sem sobrescrever por padrão.
+
+    Args:
+        con: conexão com o banco
+        amostras_resolvidas: dict {chave: {den1_ct, den2_ct, den3_ct, den4_ct, ci_ct}}
+        sobrescrever: set de (chave, campo) que o usuário autorizou sobrescrever
+
+    Returns:
+        ResultadoGravacaoTermociclador com contadores e conflitos
+    """
+    if sobrescrever is None:
+        sobrescrever = set()
+
+    resultado = ResultadoGravacaoTermociclador()
+
+    for chave, cts in amostras_resolvidas.items():
+        # Busca valores atuais no banco
+        row = con.execute(
+            f"SELECT {', '.join(COLUNAS_CT)} FROM amostras WHERE chave = %s",
+            (chave,),
+        ).fetchone()
+
+        if not row:
+            resultado.nao_encontradas.append(chave)
+            continue
+
+        campos_para_gravar = {}
+        tem_gravacao = False
+
+        for campo in COLUNAS_CT:
+            valor_novo = cts.get(campo)
+            valor_atual = row[campo]
+
+            if valor_novo is None:
+                # Não tem valor novo - não faz nada
+                continue
+
+            if valor_atual is None:
+                # Campo vazio no banco - pode gravar
+                campos_para_gravar[campo] = valor_novo
+                tem_gravacao = True
+            elif valor_atual != valor_novo:
+                # Conflito: valor diferente do existente
+                if (chave, campo) in sobrescrever:
+                    # Usuário autorizou sobrescrever
+                    campos_para_gravar[campo] = valor_novo
+                    tem_gravacao = True
+                else:
+                    # Conflito não autorizado - registra
+                    resultado.conflitos.append(ConflitoCampo(
+                        chave=chave,
+                        campo=campo,
+                        valor_atual=valor_atual,
+                        valor_novo=valor_novo,
+                    ))
+            # Se valor_atual == valor_novo, não faz nada (já está igual)
+
+        if tem_gravacao:
+            # Monta UPDATE dinâmico só para os campos que vão mudar
+            sets = ", ".join(f"{c} = %s" for c in campos_para_gravar)
+            params = list(campos_para_gravar.values()) + [chave]
+            con.execute(
+                f"UPDATE amostras SET {sets}, "
+                f"    data_resultado = CURRENT_TIMESTAMP, "
+                f"    atualizado_em = CURRENT_TIMESTAMP "
+                f"WHERE chave = %s",
+                params,
+            )
+            resultado.gravados += 1
+            resultado.campos_gravados += len(campos_para_gravar)
+
+            # Registra evento
+            for campo, valor in campos_para_gravar.items():
+                registrar_evento(con, chave, f"resultado_{campo}", str(valor))
+
+    con.commit()
+    return resultado
