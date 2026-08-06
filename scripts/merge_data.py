@@ -23,8 +23,9 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+from openpyxl import load_workbook
 
-from src.parsing import ano_verdade, calcular_flags, montar_chave, parse_ni
+from src.parsing import ano_verdade, montar_chave, parse_ni
 
 DATA = Path(__file__).resolve().parent.parent / "data"
 ARQUIVOS = ("data1.csv", "data2.csv", "data3.csv")
@@ -34,26 +35,25 @@ COL_NI = "Número Interno"
 COL_SINTOMAS = "Data do 1º Sintomas"
 COL_COLETA = "Data da Coleta"
 
-# Exames presentes no GAL -> sufixo curto usado nas colunas de resultado.
-_EXAMES = {
-    "Pesquisa de Arbovírus (ZDC)": "ZDC",
-    "Dengue, Detecção de Antígeno NS1": "NS1",
-    "Dengue, IgM": "IgM",
+# Prioridade de exame ao escolher a linha sobrevivente de cada amostra.
+# A PCR (ZDC) vem primeiro: é o exame que o sistema de reprocesso acompanha,
+# e é dele que saem os Ct do termociclador.
+_PRIORIDADE_EXAME = {
+    "Pesquisa de Arbovírus (ZDC)": 0,
+    "Dengue, Detecção de Antígeno NS1": 1,
+    "Dengue, IgM": 2,
 }
 
-# Colunas cujo valor depende do exame — replicadas por tipo de exame.
-_COLUNAS_EXAME = (
-    "Metodologia",
-    "Status Exame",
-    "Data do Processamento",
-    "Data da Liberação",
-    "1º Campo Resultado",
-    "2º Campo Resultado",
-    "3º Campo Resultado",
-    "4º Campo Resultado",
-    "5º Campo Resultado",
-    "6º Campo Resultado",
-)
+# Desempate dentro do mesmo exame: uma linha com resultado liberado descreve
+# melhor a amostra do que uma cancelada.
+_PRIORIDADE_STATUS = {
+    "Resultado Liberado": 0,
+    "Resultado Cadastrado": 1,
+    "Exame em Análise": 2,
+    "Aguardando Triagem": 3,
+    "Exame não-realizado": 4,
+    "Exame Cancelado": 5,
+}
 
 
 def _ler(caminho: Path) -> pd.DataFrame:
@@ -119,41 +119,61 @@ def resolver_ni(ni_bruto: str, data_coleta_bruta: str) -> Optional[dict]:
 
 
 def consolidar(df: pd.DataFrame) -> pd.DataFrame:
-    """Colapsa as linhas de exame de cada amostra numa única linha."""
-    # Campos estáveis dentro da amostra: primeira ocorrência não-vazia.
-    fixas = [c for c in df.columns
-             if c not in _COLUNAS_EXAME and c not in ("Exame", "_origem", "_ni")]
-    # _prefixo/_numero/_ano são constantes na amostra e seguem para a ordenação.
+    """Reduz cada amostra a UMA linha, preservando o layout original do GAL.
 
-    def _primeiro_nao_vazio(s: pd.Series) -> str:
-        for v in s:
-            if str(v).strip():
-                return v
-        return ""
+    Não cria colunas novas: escolhe a linha mais representativa da amostra e
+    descarta as demais. A prioridade é a linha de PCR (ZDC) e, dentro dela, a de
+    status mais avançado — é essa que o sistema de reprocesso consome.
+    """
+    df = df.copy()
+    df["_p_exame"] = df["Exame"].map(_PRIORIDADE_EXAME).fillna(99).astype(int)
+    df["_p_status"] = df["Status Exame"].map(_PRIORIDADE_STATUS).fillna(99).astype(int)
 
-    base = df.groupby("_ni", sort=False)[fixas].agg(_primeiro_nao_vazio)
-
-    # Campos de resultado: uma coluna por (exame, campo).
-    blocos = [base]
-    for exame, sufixo in _EXAMES.items():
-        sub = df[df["Exame"] == exame]
-        if sub.empty:
-            continue
-        agg = sub.groupby("_ni", sort=False)[list(_COLUNAS_EXAME)].agg(
-            _primeiro_nao_vazio
-        )
-        agg.columns = [f"{c} [{sufixo}]" for c in agg.columns]
-        blocos.append(agg)
-
-    # Rastreabilidade: de quais arquivos e exames a amostra veio.
-    meta = df.groupby("_ni", sort=False).agg(
-        Exames_Encontrados=("Exame", lambda s: " | ".join(sorted(set(s)))),
-        Arquivos_Origem=("_origem", lambda s: " | ".join(sorted(set(s)))),
-        Linhas_Originais=("Exame", "size"),
+    escolhidas = (
+        df.sort_values(["_p_exame", "_p_status"], kind="stable")
+        .groupby("_ni", sort=False, as_index=False)
+        .head(1)
     )
-    blocos.append(meta)
+    return escolhidas.drop(columns=["_p_exame", "_p_status"])
 
-    return pd.concat(blocos, axis=1).reset_index(drop=True)
+
+def _escrever(df: pd.DataFrame, destino: Path) -> None:
+    """Grava o xlsx com formatação legível.
+
+    O default do openpyxl é Calibri 11 sem larguras definidas, o que deixa a
+    planilha com aparência de texto cru. Aqui o corpo usa Arial (mesma fonte da
+    planilha de origem do projeto), o cabeçalho fica em negrito congelado e as
+    colunas ganham largura proporcional ao conteúdo.
+    """
+    from openpyxl.styles import Alignment, Font
+    from openpyxl.utils import get_column_letter
+
+    df.to_excel(destino, index=False, engine="openpyxl")
+
+    wb = load_workbook(destino)
+    ws = wb.active
+
+    corpo = Font(name="Arial", size=10)
+    cabecalho = Font(name="Arial", size=10, bold=True)
+
+    for celula in ws[1]:
+        celula.font = cabecalho
+        celula.alignment = Alignment(horizontal="center", vertical="center")
+
+    for linha in ws.iter_rows(min_row=2):
+        for celula in linha:
+            celula.font = corpo
+
+    # Largura pelo maior conteúdo real da coluna, com teto para não estourar a
+    # tela por causa de campos livres como Observação.
+    for i, nome in enumerate(df.columns, start=1):
+        maior = int(df[nome].astype(str).str.len().max() or 0)
+        largura = max(len(str(nome)), min(maior, 40)) + 2
+        ws.column_dimensions[get_column_letter(i)].width = largura
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    wb.save(destino)
 
 
 def main() -> None:
@@ -181,26 +201,8 @@ def main() -> None:
     print(f"[3] Removidas {antes - len(df)} linhas idênticas (sobreposição)")
 
     final = consolidar(df)
-    print(f"[4] Consolidado: {len(final)} amostras únicas")
-
-    # Flags de inconsistência (Seção 3.4) — sinalizam, nunca bloqueiam.
-    final["Flags"] = [
-        calcular_flags(
-            ni_ano=parse_ni(ni).ni_ano if parse_ni(ni) else None,
-            ano_verdade_=ano,
-            data_coleta=_data(dc),
-            data_sintomas=_data(ds),
-        )
-        for ni, ano, dc, ds in zip(
-            final[COL_NI], final["_ano"], final[COL_COLETA], final[COL_SINTOMAS]
-        )
-    ]
-
-    # Datas de sintomas e coleta lado a lado, logo após o Número Interno.
-    cols = [c for c in final.columns if c not in (COL_SINTOMAS, COL_COLETA)]
-    i = cols.index(COL_NI) + 1
-    cols[i:i] = [COL_SINTOMAS, COL_COLETA]
-    final = final[cols]
+    n_pcr = (final["Exame"] == "Pesquisa de Arbovírus (ZDC)").sum()
+    print(f"[4] Consolidado: {len(final)} amostras únicas ({n_pcr} com linha de PCR)")
 
     # Ordenação canônica da Seção 3.3: ano_verdade, prefixo, numero_sequencial.
     # numero_sequencial precisa ser INTEGER (3.3) — como texto, D1000 viria
@@ -211,13 +213,18 @@ def main() -> None:
         ["_ano", "_prefixo", "_numero"], kind="stable"
     ).reset_index(drop=True)
 
-    n_flags = (final["Flags"] != "").sum()
-    final = final.drop(columns=["_ano", "_prefixo", "_numero"])
+    # Volta ao layout original do GAL: só as colunas do export, sem auxiliares.
+    final = final[[c for c in final.columns if not c.startswith("_")]]
 
-    final.to_excel(SAIDA, index=False, engine="openpyxl")
+    # Datas de sintomas e coleta lado a lado, logo após o Número Interno.
+    cols = [c for c in final.columns if c not in (COL_SINTOMAS, COL_COLETA)]
+    i = cols.index(COL_NI) + 1
+    cols[i:i] = [COL_SINTOMAS, COL_COLETA]
+    final = final[cols]
+
+    _escrever(final, SAIDA)
     print(f"[5] Planilha gerada: {SAIDA}")
     print(f"    {len(final)} linhas x {len(final.columns)} colunas")
-    print(f"    {n_flags} amostras com flags de inconsistência")
 
 
 if __name__ == "__main__":
