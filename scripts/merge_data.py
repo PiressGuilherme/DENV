@@ -42,6 +42,7 @@ COL_COLETA = "Data da Coleta"
 COL_EXAME = "Exame"
 COL_STATUS = "Status Exame"
 COL_KIT = "Kit"
+COL_PROCESSAMENTO = "Data do Processamento"
 
 EXAME_PCR = "Pesquisa de Arbovírus (ZDC)"
 
@@ -132,24 +133,24 @@ def _data(valor: str):
 
 
 def ja_fez_pcr(linha) -> bool:
-    """True se a amostra já passou pela PCR, pelos sinais do GAL.
+    """True se a PCR da amostra foi de fato CONCLUÍDA, pelos sinais do GAL.
 
-    Dois sinais independentes, unidos por OR porque cada um sozinho perde casos
-    reais (verificado nos dados: 7 divergências em 5.772 registros ZDC):
+    Exige linha de PCR (ZDC) e status concluído ou data de processamento. Os dois
+    sinais concordam integralmente nos dados (601 amostras, zero divergência).
 
-    - Status concluído sem Kit (2 casos): PCR feita, kit não preenchido no GAL —
-      têm data de processamento/liberação e resultado real.
-    - Kit preenchido com exame cancelado (5 casos): o kit foi consumido, ou seja,
-      a amostra passou pela bancada e o exame foi cancelado depois.
+    O Kit de propósito NÃO conta como prova. Há 5 amostras com kit de PCR
+    registrado e exame cancelado, sem data de processamento e sem resultado: o
+    kit foi alocado, mas a PCR nunca produziu resultado — essas amostras ainda
+    PRECISAM de PCR e não podem ser excluídas do fluxo da equipe.
 
-    Só vale para a linha de PCR: um kit registrado numa linha de NS1/IgM não diz
-    nada sobre a PCR.
+    Kits de sorologia (ELISA/NS1) em linhas não-ZDC são irrelevantes: só a linha
+    de PCR diz algo sobre a PCR.
     """
     if str(linha[COL_EXAME]).strip() != EXAME_PCR:
         return False
     return (
         str(linha[COL_STATUS]).strip() in _STATUS_CONCLUIDO
-        or str(linha[COL_KIT]).strip() != ""
+        or _data(linha[COL_PROCESSAMENTO]) is not None
     )
 
 
