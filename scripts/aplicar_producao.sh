@@ -8,9 +8,10 @@
 # Para revisar sem alterar nada (só backup + dry-run):
 #     bash scripts/aplicar_producao.sh --simular
 #
-# O backup usa pg_dump da imagem postgres:16-alpine via Docker, evitando
-# instalar o cliente localmente. Sem backup gravado, o script não prossegue —
-# um DELETE não tem desfazer.
+# O backup usa pg_dump via Docker, evitando instalar o cliente localmente. A
+# major do cliente é detectada a partir do servidor: o pg_dump recusa rodar
+# contra servidor de major maior (o Neon está em 18.x). Sem backup gravado, o
+# script não prossegue — um DELETE não tem desfazer.
 
 set -euo pipefail
 
@@ -30,7 +31,16 @@ mkdir -p backups
 echo "=============================================="
 echo " [1/4] BACKUP"
 echo "=============================================="
-docker run --rm -e PGPASSWORD --network host postgres:16-alpine \
+# Casa a major do cliente com a do servidor (pg_dump recusa servidor mais novo).
+PG_MAJOR=$(python -c "
+from src import db
+con = db.conectar()
+print(con.execute('SHOW server_version').fetchone()['server_version'].split('.')[0])
+con.close()
+")
+echo "Servidor PostgreSQL: $PG_MAJOR — usando postgres:${PG_MAJOR}-alpine"
+
+docker run --rm --network host "postgres:${PG_MAJOR}-alpine" \
     pg_dump "$DATABASE_URL" --table=amostras --table=eventos \
     --no-owner --no-privileges > "$BACKUP"
 

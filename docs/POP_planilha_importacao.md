@@ -88,6 +88,13 @@ bash scripts/aplicar_producao.sh --simular   # backup + dry-run, não altera nad
 bash scripts/aplicar_producao.sh             # aplica de verdade
 ```
 
+> **Atenção à branch do Neon.** Produção roda na branch **`denv`**, não na branch
+> default. As duas têm endpoints diferentes (`ep-cool-sun-...` é a `denv`;
+> `ep-rough-unit-...` é a default, que está vazia). Pegue a string em
+> **Neon → Branches → denv → Connect**. Antes de aplicar, confira que o banco
+> responde ~5.500+ amostras com progresso de bancada — banco vazio significa
+> branch errada.
+
 O script executa, nesta ordem:
 
 1. **Backup** — `pg_dump` das tabelas `amostras` e `eventos` em `backups/`.
@@ -191,12 +198,23 @@ Reimportar a mesma planilha é seguro e idempotente.
 | `AssertionError` nas contagens | Rodou com `verificar_sanidade=True`; os valores são fixos na planilha de 2025 |
 | Acentos quebrados (`Requisi��o`) | CSV lido como UTF-8 — o GAL exporta em ISO-8859-1 |
 | `ABORTADO: N chaves sem evidência` | A planilha total não corresponde à usada para gerar as pendentes; regere ambas |
+| `pg_dump: server version mismatch` | Cliente mais antigo que o servidor. O script já detecta a major do servidor; se falhar, confira se a imagem `postgres:<major>-alpine` existe |
+| Banco responde 0 amostras | Branch errada do Neon — produção é a `denv` |
 
 ---
 
 ## Histórico
 
-**Agosto/2026 — primeira carga por este processo.** 3 CSVs do GAL (21.468
-linhas) → 5.863 amostras de dengue → 601 já com PCR concluída → **5.262
-importadas**. No banco: 161 amostras com PCR anterior removidas, depois 3.787
-inseridas + 1.475 atualizadas.
+**07/08/2026 — primeira carga por este processo (aplicada em produção).**
+
+3 CSVs do GAL (21.468 linhas) → 5.863 amostras de dengue → 601 já com PCR
+concluída → **5.262 importadas**.
+
+No banco: 5.506 → **9.132** amostras (2025: 3.415 | 2026: 5.717).
+161 amostras com PCR anterior removidas (nenhuma tinha trabalho de bancada),
+depois 3.787 inseridas + 1.475 atualizadas.
+
+Progresso da equipe conferido antes e depois, sem alteração:
+coletada 3.011 · extraída 650 · PCR feito 558 · rejeitada 262 · 4.627 eventos.
+
+Backup do estado anterior: `backups/amostras_20260807_095522.sql`.
