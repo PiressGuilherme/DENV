@@ -26,3 +26,6 @@ data/dengue_consolidado*.xlsx
 
 # Arquivos de lock do LibreOffice
 .~lock.*#
+
+# Dumps de backup do banco — contêm dados de paciente.
+backups/
