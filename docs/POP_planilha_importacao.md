@@ -161,6 +161,31 @@ O GAL traz uma linha por **exame** (NS1, IgM, ZDC), então a mesma amostra
 aparece ~3 vezes. O sistema espera uma linha por amostra. O script escolhe a
 linha de **PCR (ZDC)** e, no desempate, a de status mais avançado.
 
+### Janela de 5 dias entre sintoma e coleta
+
+Só entram amostras coletadas em **até 5 dias** após o 1º sintoma. Acima disso a
+carga viral já caiu e a PCR perde sensibilidade. É a mesma regra que gerou a
+planilha histórica `dengue_coleta_dentro_prazo_mun_ordenado` (cujo `Dif Dias`
+tem máximo 5).
+
+O `merge_data` já aplica o filtro ao gerar a planilha de pendentes. Para o
+tratamento retroativo de cargas anteriores:
+
+```bash
+python -m scripts.remover_fora_do_prazo             # dry-run
+python -m scripts.remover_fora_do_prazo --executar  # aplica
+```
+
+**Diferença negativa não é removida.** Coleta antes do 1º sintoma é erro de
+digitação, não amostra tardia — permanece no fluxo, sinalizada pela flag
+`COLETA_ANTES_SINTOMA`. Amostra sem uma das datas também permanece.
+
+Sobre o cálculo: no banco as colunas são `DATE` nativas, então
+`data_coleta - data_sintomas` devolve dias inteiros sem parse. Na planilha o
+`_data()` testa formatos dia-primeiro explicitamente, cobrindo os dois padrões
+que o GAL mistura (`26-04-2026` e `26/04/26`). Nunca subtraia as datas como
+texto nem deixe o pandas inferir: `03/04/26` viraria 4 de março.
+
 ### Critério de "já fez PCR"
 
 Uma amostra é excluída do import (e removida do banco) quando tem linha ZDC
@@ -220,7 +245,13 @@ No banco: 5.506 → **9.132** amostras (2025: 3.415 | 2026: 5.717).
 161 amostras com PCR anterior removidas (nenhuma tinha trabalho de bancada),
 depois 3.787 inseridas + 1.475 atualizadas.
 
-Progresso da equipe conferido antes e depois, sem alteração:
-coletada 3.011 · extraída 650 · PCR feito 558 · rejeitada 262 · 4.627 eventos.
-
 Backup do estado anterior: `backups/amostras_20260807_095522.sql`.
+
+**07/08/2026 — janela de 5 dias aplicada retroativamente.** A carga acima entrou
+antes de a regra existir no `merge_data`. Removidas **2.371** amostras coletadas
+mais de 5 dias após o 1º sintoma (nenhuma com trabalho de bancada):
+9.132 → **6.761** (2025: 3.415 | 2026: 3.346). As 33 de diferença negativa foram
+mantidas. Backup: `backups/amostras_prazo_20260807_114127.sql`.
+
+Progresso da equipe conferido em todas as etapas, sem alteração:
+coletada 3.011 · extraída 650 · PCR feito 558 · rejeitada 262 · 4.627 eventos.

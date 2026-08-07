@@ -22,7 +22,7 @@ Uso:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -63,6 +63,12 @@ EXAME_PCR = "Pesquisa de Arbovírus (ZDC)"
 
 # Status que indicam PCR concluída no GAL.
 _STATUS_CONCLUIDO = frozenset({"Resultado Liberado", "Resultado Cadastrado"})
+
+# Janela máxima, em dias, entre o 1º sintoma e a coleta. Acima disso a carga
+# viral já caiu e a PCR perde sensibilidade — a amostra não serve para
+# reprocesso. É a mesma regra que gerou a planilha histórica
+# "dengue_coleta_dentro_prazo_mun_ordenado" (cujo Dif Dias tem máximo 5).
+MAX_DIAS_SINTOMA_COLETA = 5
 
 # Colunas mantidas na saída. O importador usa só 6 (ver importer.COL_*), mas as
 # demais dão contexto para conferência humana. Ficam de fora os campos de
@@ -181,15 +187,28 @@ def _ler(caminho: Path, *, apenas_cabecalho: bool = False) -> pd.DataFrame:
     return df
 
 
-def _data(valor: str):
+def _data(valor):
     """Converte as datas do GAL em datetime.
 
     O GAL mistura dois formatos na MESMA coluna ('26-04-2026' e '26/04/26'), por
     isso os formatos são testados explicitamente, todos dia-primeiro. Deixar o
     pandas inferir leria '03/04/26' como 4 de março em vez de 3 de abril.
+
+    Valores que já são data passam direto: a função é aplicada tanto sobre CSV
+    (texto) quanto sobre xlsx já convertido, e converter duas vezes zeraria a
+    coluna inteira.
     """
+    if valor is None or valor is pd.NaT:
+        return None
+    if isinstance(valor, datetime):
+        return valor
+    if isinstance(valor, date):
+        return datetime(valor.year, valor.month, valor.day)
+    if isinstance(valor, pd.Timestamp):
+        return valor.to_pydatetime()
+
     texto = str(valor).strip()
-    if not texto:
+    if not texto or texto.lower() in ("nat", "nan"):
         return None
     for fmt in ("%d/%m/%y", "%d-%m-%Y", "%d/%m/%Y", "%d-%m-%y"):
         try:
@@ -197,6 +216,33 @@ def _data(valor: str):
         except ValueError:
             continue
     return None
+
+
+def dias_sintoma_coleta(linha) -> Optional[int]:
+    """Dias entre o 1º sintoma e a coleta, ou None se faltar alguma data.
+
+    Usa _data() nos dois campos em vez de subtrair texto: o GAL mistura
+    '26-04-2026' e '26/04/26' na mesma coluna, e ambos são dia-primeiro. Comparar
+    as strings, ou deixar o pandas inferir, trocaria dia por mês em datas como
+    '03/04/26' e produziria uma diferença de dias silenciosamente errada.
+    """
+    sintomas = _data(linha[COL_SINTOMAS])
+    coleta = _data(linha[COL_COLETA])
+    if sintomas is None or coleta is None:
+        return None
+    return (coleta - sintomas).days
+
+
+def fora_do_prazo(linha) -> bool:
+    """True se a coleta ocorreu tarde demais depois do 1º sintoma.
+
+    Só exclui o que está comprovadamente ACIMA da janela. Diferença negativa
+    (coleta antes do sintoma) é erro de digitação, não amostra tardia: fica no
+    fluxo, sinalizada pela flag COLETA_ANTES_SINTOMA. Data ausente também não
+    exclui — na dúvida a amostra permanece e a equipe decide.
+    """
+    dias = dias_sintoma_coleta(linha)
+    return dias is not None and dias > MAX_DIAS_SINTOMA_COLETA
 
 
 def ja_fez_pcr(linha) -> bool:
@@ -408,15 +454,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(f"[5] Planilha total: {SAIDA_TOTAL.name}")
     print(f"    {len(final)} linhas x {len(final.columns)} colunas")
 
-    # A planilha de import exclui quem já passou pela PCR. O filtro vem por
-    # último, sobre o dataset já consolidado e ordenado, para que os dois
-    # arquivos sejam idênticos linha a linha exceto pelas removidas.
+    # A planilha de import exclui quem já passou pela PCR e quem foi coletado
+    # fora da janela de sintomas. Os filtros vêm por último, sobre o dataset já
+    # consolidado e ordenado, para que os dois arquivos sejam idênticos linha a
+    # linha exceto pelas removidas.
     fez_pcr = final.apply(ja_fez_pcr, axis=1)
-    pendentes = final[~fez_pcr].reset_index(drop=True)
+    tardia = final.apply(fora_do_prazo, axis=1)
+    pendentes = final[~fez_pcr & ~tardia].reset_index(drop=True)
 
     _escrever(pendentes, SAIDA_PENDENTES)
     print(f"[6] Planilha de importação: {SAIDA_PENDENTES.name}")
-    print(f"    {len(pendentes)} linhas ({int(fez_pcr.sum())} já fizeram PCR, removidas)")
+    print(f"    {len(pendentes)} linhas")
+    print(f"    removidas: {int(fez_pcr.sum())} já fizeram PCR, "
+          f"{int((tardia & ~fez_pcr).sum())} coletadas >{MAX_DIAS_SINTOMA_COLETA} "
+          f"dias após o 1º sintoma")
     return 0
 
 
