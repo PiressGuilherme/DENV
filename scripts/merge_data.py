@@ -12,8 +12,12 @@ para UMA linha por amostra, preferindo a linha da PCR (ZDC). Gera dois arquivos:
     dengue_consolidado_pendentes.xlsx  sem as amostras que já fizeram PCR
                                        — é esta que vai para o sistema
 
+Os arquivos de entrada são descobertos automaticamente: qualquer .csv/.xlsx em
+data/ que tenha a coluna 'Número Interno' entra, com o nome que o GAL tiver dado.
+
 Uso:
-    python -m scripts.merge_data
+    python -m scripts.merge_data                    # tudo que houver em data/
+    python -m scripts.merge_data a.csv b.csv        # arquivos específicos
 """
 
 from __future__ import annotations
@@ -28,9 +32,20 @@ from openpyxl import load_workbook
 from src.parsing import ano_verdade, montar_chave, parse_ni
 
 DATA = Path(__file__).resolve().parent.parent / "data"
-ARQUIVOS = ("data1.csv", "data2.csv", "data3.csv")
 SAIDA_TOTAL = DATA / "dengue_consolidado.xlsx"
 SAIDA_PENDENTES = DATA / "dengue_consolidado_pendentes.xlsx"
+
+# Extensões aceitas como export do GAL. O .xlsx entra porque o GAL também
+# exporta nesse formato — e é o erro mais provável de quem baixar sem reparar.
+_EXTENSOES = (".csv", ".xlsx", ".xls")
+
+# Saídas do próprio script e planilhas conhecidas do projeto: nunca entram como
+# ENTRADA, senão uma segunda execução consumiria o próprio resultado.
+_IGNORAR = (
+    SAIDA_TOTAL.name,
+    SAIDA_PENDENTES.name,
+    "dengue_coleta_dentro_prazo_mun_ordenado.xlsx",
+)
 
 # O importador lê a aba por nome fixo (importer.ABA) — divergir daqui faz o
 # import falhar antes de ler a primeira linha.
@@ -101,15 +116,67 @@ _PRIORIDADE_STATUS = {
 }
 
 
-def _ler(caminho: Path) -> pd.DataFrame:
+def descobrir_entradas(diretorio: Path = DATA) -> list[Path]:
+    """Encontra os exports do GAL num diretório.
+
+    Aceita qualquer nome de arquivo: o que identifica um export do GAL é ter a
+    coluna 'Número Interno', não se chamar data1.csv. Assim o operador larga os
+    arquivos na pasta com o nome que o GAL deu e roda o script.
+
+    As saídas do próprio script são excluídas para que reexecutar não realimente
+    o resultado como entrada.
+    """
+    candidatos = sorted(
+        p for p in diretorio.iterdir()
+        if p.is_file()
+        and p.suffix.lower() in _EXTENSOES
+        and p.name not in _IGNORAR
+        and not p.name.startswith((".", "~$"))
+    )
+
+    entradas = []
+    for p in candidatos:
+        try:
+            colunas = _ler(p, apenas_cabecalho=True).columns
+        except Exception as exc:
+            print(f"    ignorado {p.name}: não foi possível ler ({type(exc).__name__})")
+            continue
+        if COL_NI in colunas:
+            entradas.append(p)
+        else:
+            print(f"    ignorado {p.name}: sem coluna {COL_NI!r}")
+    return entradas
+
+
+def _ler(caminho: Path, *, apenas_cabecalho: bool = False) -> pd.DataFrame:
     """Lê um export do GAL preservando tudo como texto.
 
     dtype=str + keep_default_na=False evitam que o pandas transforme códigos em
     float (431490.0) ou vazios em NaN — ambos corromperiam identificadores.
+
+    Aceita CSV (o formato usual, `;` e ISO-8859-1) e xlsx, porque o GAL exporta
+    nos dois. Para CSV a codificação é tentada em ordem: ISO-8859-1 cobre o
+    export padrão, UTF-8 cobre arquivos reprocessados por planilha.
     """
-    df = pd.read_csv(
-        caminho, sep=";", encoding="iso-8859-1", dtype=str, keep_default_na=False
-    )
+    nlinhas = 0 if apenas_cabecalho else None
+
+    if caminho.suffix.lower() in (".xlsx", ".xls"):
+        df = pd.read_excel(caminho, dtype=str, keep_default_na=False, nrows=nlinhas)
+    else:
+        erro = None
+        for enc in ("iso-8859-1", "utf-8-sig", "utf-8"):
+            try:
+                df = pd.read_csv(
+                    caminho, sep=";", encoding=enc, dtype=str,
+                    keep_default_na=False, nrows=nlinhas,
+                )
+                break
+            except UnicodeDecodeError as exc:
+                erro = exc
+        else:
+            raise erro
+
+    df.columns = [str(c).strip() for c in df.columns]
     df["_origem"] = caminho.stem
     return df
 
@@ -263,9 +330,42 @@ def _escrever(df: pd.DataFrame, destino: Path) -> None:
     wb.save(destino)
 
 
-def main() -> None:
-    df = pd.concat([_ler(DATA / a) for a in ARQUIVOS], ignore_index=True)
-    print(f"[1] Concatenado: {len(df)} linhas de {len(ARQUIVOS)} arquivos")
+def main(argv: Optional[list[str]] = None) -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("arquivos", nargs="*", type=Path,
+                    help="exports do GAL (default: todos os encontrados em data/)")
+    args = ap.parse_args(argv)
+
+    if args.arquivos:
+        entradas = args.arquivos
+        faltando = [p for p in entradas if not p.exists()]
+        if faltando:
+            print(f"ERRO: não encontrado: {', '.join(str(p) for p in faltando)}")
+            return 1
+    else:
+        print(f"[0] Procurando exports do GAL em {DATA}/")
+        entradas = descobrir_entradas()
+
+    if not entradas:
+        print(f"ERRO: nenhum export do GAL encontrado em {DATA}/.\n"
+              f"      Um export precisa ter a coluna {COL_NI!r}.")
+        return 1
+
+    quadros = []
+    for p in entradas:
+        d = _ler(p)
+        quadros.append(d)
+        print(f"    {p.name}: {len(d)} linhas")
+
+    df = pd.concat(quadros, ignore_index=True)
+    print(f"[1] Concatenado: {len(df)} linhas de {len(entradas)} arquivo(s)")
+
+    faltantes = [c for c in COLUNAS_SAIDA if c not in df.columns]
+    if faltantes:
+        print(f"ERRO: colunas ausentes nos arquivos: {faltantes}")
+        return 1
 
     resolvidos = [
         resolver_ni(ni, coleta)
@@ -317,7 +417,8 @@ def main() -> None:
     _escrever(pendentes, SAIDA_PENDENTES)
     print(f"[6] Planilha de importação: {SAIDA_PENDENTES.name}")
     print(f"    {len(pendentes)} linhas ({int(fez_pcr.sum())} já fizeram PCR, removidas)")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

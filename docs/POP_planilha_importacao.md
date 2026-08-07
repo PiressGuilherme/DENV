@@ -28,23 +28,27 @@ GAL (CSV)  ──►  merge_data  ──►  2 planilhas  ──►  backup ─�
 
 ## 1. Exportar do GAL
 
-Exporte os dados como CSV e salve em `data/` como `data1.csv`, `data2.csv`,
-`data3.csv`. Para outra quantidade de arquivos, ajuste `ARQUIVOS` em
-`scripts/merge_data.py`.
+Exporte os dados e salve em `data/`. **O nome e a quantidade de arquivos são
+livres** — pode largar `GAL_export_2026-08-07.csv`, `relatorio julho.xlsx`, dois
+arquivos ou dez. O script identifica um export do GAL por ter a coluna
+`Número Interno`, não pelo nome.
 
 | Item | Valor |
 |---|---|
-| Separador | `;` (ponto e vírgula) |
-| Codificação | ISO-8859-1 (Latin-1) |
+| Formato | `.csv` (usual) ou `.xlsx` |
+| Separador (CSV) | `;` (ponto e vírgula) |
+| Codificação (CSV) | ISO-8859-1 ou UTF-8 (detectada automaticamente) |
 | Cabeçalho | 1ª linha, 110 colunas |
 
 Os arquivos **podem se sobrepor** — o script remove duplicatas. Não recorte
-períodos manualmente.
+períodos manualmente. Arquivos sem a coluna `Número Interno` são ignorados com
+aviso, e as saídas do próprio script nunca entram como entrada.
 
 ## 2. Gerar as planilhas
 
 ```bash
-python -m scripts.merge_data
+python -m scripts.merge_data                 # usa tudo que houver em data/
+python -m scripts.merge_data a.csv b.xlsx    # ou arquivos específicos
 ```
 
 Saída em `data/`:
@@ -195,7 +199,9 @@ Reimportar a mesma planilha é seguro e idempotente.
 | `ForeignKeyViolation` ao remover | `eventos.chave` tem FK sem `ON DELETE`; o script já apaga os eventos antes |
 | Muitas linhas ignoradas no import | `Número Interno` ausente ou sem `/ano` (ex.: `D3809` sem ano) |
 | Amostra duplicada em dois anos | Data da Coleta lida como texto, com dia/mês trocados |
-| `AssertionError` nas contagens | Rodou com `verificar_sanidade=True`; os valores são fixos na planilha de 2025 |
+| `AssertionError: nenhuma amostra válida` | Planilha sem a coluna `Número Interno` ou com aba errada |
+| `AssertionError: N% das linhas descartadas` | Planilha provavelmente errada — mais de 50% dos NIs inválidos |
+| `nenhum export do GAL encontrado` | Nenhum arquivo em `data/` tem a coluna `Número Interno` |
 | Acentos quebrados (`Requisi��o`) | CSV lido como UTF-8 — o GAL exporta em ISO-8859-1 |
 | `ABORTADO: N chaves sem evidência` | A planilha total não corresponde à usada para gerar as pendentes; regere ambas |
 | `pg_dump: server version mismatch` | Cliente mais antigo que o servidor. O script já detecta a major do servidor; se falhar, confira se a imagem `postgres:<major>-alpine` existe |

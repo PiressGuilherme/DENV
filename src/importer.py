@@ -297,16 +297,40 @@ def importar(
     return resultado
 
 
-def _assert_sanidade(r: ResultadoImport) -> None:
-    """Asserts de sanidade da Seção 7 passo 8.
+# Fração de linhas descartadas acima da qual o import é considerado suspeito.
+# Descarte alto quase sempre significa planilha errada ou coluna de NI renomeada,
+# não dado ruim de verdade. A carga de referência descartou 7% (1.276 de 17.624).
+_MAX_FRACAO_IGNORADA = 0.5
 
-    Contagens por ano refletem a reclassificação 2026 (73 amostras D, ni_ano=2026,
-    nº 1–976, movidas de 2025 para 2026). Antes da regra: 3.488 / 2.018.
+
+def _assert_sanidade(r: ResultadoImport) -> None:
+    """Verifica invariantes do import (Seção 7 passo 8).
+
+    Checa propriedades que valem para QUALQUER planilha válida, não as contagens
+    de uma carga específica: números absolutos ficavam obsoletos a cada extração
+    nova do GAL e falhavam por estarem desatualizados, não por erro real.
     """
-    assert r.total_ignoradas == 1276, f"ignoradas={r.total_ignoradas} (esperado 1276)"
-    assert r.amostras_unicas == 5506, f"únicas={r.amostras_unicas} (esperado 5506)"
-    assert r.por_ano.get(2025) == 3415, f"2025={r.por_ano.get(2025)} (esperado 3415)"
-    assert r.por_ano.get(2026) == 2091, f"2026={r.por_ano.get(2026)} (esperado 2091)"
+    assert r.linhas_brutas > 0, "planilha vazia (0 linhas lidas)"
+    assert r.amostras_unicas > 0, (
+        f"nenhuma amostra válida em {r.linhas_brutas} linhas — "
+        f"confira a coluna '{COL_NI}' e o nome da aba"
+    )
+    assert r.amostras_unicas <= r.linhas_brutas, (
+        f"únicas={r.amostras_unicas} > linhas={r.linhas_brutas} (agrupamento furado)"
+    )
+    assert r.total_ignoradas + r.amostras_unicas <= r.linhas_brutas, (
+        f"ignoradas({r.total_ignoradas}) + únicas({r.amostras_unicas}) "
+        f"> linhas({r.linhas_brutas})"
+    )
+    assert sum(r.por_ano.values()) == r.amostras_unicas, (
+        f"soma por ano ({sum(r.por_ano.values())}) != únicas ({r.amostras_unicas})"
+    )
+
+    fracao = r.total_ignoradas / r.linhas_brutas
+    assert fracao <= _MAX_FRACAO_IGNORADA, (
+        f"{fracao:.0%} das linhas descartadas ({r.total_ignoradas}/{r.linhas_brutas}) "
+        f"— planilha provavelmente errada"
+    )
 
 
 def main(argv: list[str]) -> int:
