@@ -147,11 +147,12 @@ _COR_REJEITADA = "#e53935"
 # --------------------------------------------------------------------------- #
 # Sorotipos / resultados de PCR                                                 #
 # --------------------------------------------------------------------------- #
-# Valores de Ct (threshold cycle). NULL = sorotipo não detectado / não informado.
+# Valores de Ct (threshold cycle). NULL = sorotipo não testado (não veio no arquivo).
+# -1.0 = "não detectado" (veio no arquivo com Ct "-").
 # `data_resultado` é o que define "já tem resultado" de forma inequívoca: um Ct
 # nulo sozinho é ambíguo (pode ser negativo OU nunca preenchido).
 
-SOROTIPOS: tuple[str, ...] = ("DEN1", "DEN2", "DEN3", "DEN4", "CI")
+SOROTIPOS: tuple[str, ...] = ("DEN1", "DEN2", "DEN3", "DEN4")
 
 # Opção de filtro para "tem resultado, mas nenhum sorotipo detectado".
 SOROTIPO_NAO_DETECTADO = "__nd__"
@@ -164,9 +165,13 @@ def coluna_ct(sorotipo: str) -> str:
 
 COLUNAS_CT: tuple[str, ...] = tuple(coluna_ct(s) for s in SOROTIPOS)
 
+# Controle Interno (CI) - duas colunas, uma por arquivo de corrida
+COLUNAS_CI: tuple[str, ...] = ("ci_1_4_ct", "ci_2_3_ct")
+
 # Faixa plausível de Ct numa PCR em tempo real. Fora disso o valor é recusado
 # (quase sempre é erro de digitação ou coluna trocada na planilha).
-CT_MIN = 0.0
+# -1.0 é valor sentinela para "não detectado" (Ct lido como "-" na planilha).
+CT_MIN = -1.0
 CT_MAX = 50.0
 
 CAMPOS_REPROCESSO = (
@@ -184,13 +189,14 @@ CAMPOS_DESCRITIVOS = (
 
 # Colunas adicionadas após a 1ª versão do schema (migração leve para bancos antigos).
 _COLUNAS_MIGRACAO = {
-    "rejeitada":      "INTEGER NOT NULL DEFAULT 0",
-    "motivo_rejeicao": "TEXT",
-    "data_rejeicao":  "TIMESTAMP",
-    "sequenciado":    "INTEGER NOT NULL DEFAULT 0",
+    "rejeitada":        "INTEGER NOT NULL DEFAULT 0",
+    "motivo_rejeicao":  "TEXT",
+    "data_rejeicao":    "TIMESTAMP",
+    "sequenciado":      "INTEGER NOT NULL DEFAULT 0",
     "data_sequenciado": "TIMESTAMP",
     **{c: "NUMERIC(6,2)" for c in COLUNAS_CT},
-    "data_resultado": "TIMESTAMP",
+    **{c: "NUMERIC(6,2)" for c in COLUNAS_CI},
+    "data_resultado":   "TIMESTAMP",
 }
 
 _SCHEMA = [
@@ -851,7 +857,7 @@ def resolver_amostras_termociclador(
             - prefixo (str, default "D")
             - numero_sequencial (int)
             - ano_verdade (int, opcional)
-            - cts: dict com den1_ct, den2_ct, den3_ct, den4_ct, ci_ct
+            - cts: dict com den1_ct, den2_ct, den3_ct, den4_ct, ci_1_4_ct, ci_2_3_ct
 
     Returns:
         Tupla (amostras_resolvidas, nao_encontradas, ano_ambiguo)
@@ -917,7 +923,7 @@ def gravar_resultados_termociclador(
 
     Args:
         con: conexão com o banco
-        amostras_resolvidas: dict {chave: {den1_ct, den2_ct, den3_ct, den4_ct, ci_ct}}
+        amostras_resolvidas: dict {chave: {den1_ct, den2_ct, den3_ct, den4_ct, ci_1_4_ct, ci_2_3_ct}}
         sobrescrever: set de (chave, campo) que o usuário autorizou sobrescrever
 
     Returns:
@@ -928,10 +934,13 @@ def gravar_resultados_termociclador(
 
     resultado = ResultadoGravacaoTermociclador()
 
+    # Todas as colunas que podem ser gravadas (DEN1-4 + CI 1-4 + CI 2-3)
+    TODOS_CAMPOS = (*COLUNAS_CT, *COLUNAS_CI)
+
     for chave, cts in amostras_resolvidas.items():
         # Busca valores atuais no banco
         row = con.execute(
-            f"SELECT {', '.join(COLUNAS_CT)} FROM amostras WHERE chave = %s",
+            f"SELECT {', '.join(TODOS_CAMPOS)} FROM amostras WHERE chave = %s",
             (chave,),
         ).fetchone()
 
@@ -940,9 +949,10 @@ def gravar_resultados_termociclador(
             continue
 
         campos_para_gravar = {}
+        conflitos_amostra = []  # para log JSON
         tem_gravacao = False
 
-        for campo in COLUNAS_CT:
+        for campo in TODOS_CAMPOS:
             valor_novo = cts.get(campo)
             valor_atual = row[campo]
 
@@ -953,12 +963,24 @@ def gravar_resultados_termociclador(
             if valor_atual is None:
                 # Campo vazio no banco - pode gravar
                 campos_para_gravar[campo] = valor_novo
+                conflitos_amostra.append({
+                    "campo": campo,
+                    "valor_atual": None,
+                    "valor_novo": valor_novo,
+                    "sobrescrito": False,
+                })
                 tem_gravacao = True
             elif valor_atual != valor_novo:
                 # Conflito: valor diferente do existente
                 if (chave, campo) in sobrescrever:
                     # Usuário autorizou sobrescrever
                     campos_para_gravar[campo] = valor_novo
+                    conflitos_amostra.append({
+                        "campo": campo,
+                        "valor_atual": valor_atual,
+                        "valor_novo": valor_novo,
+                        "sobrescrito": True,
+                    })
                     tem_gravacao = True
                 else:
                     # Conflito não autorizado - registra
@@ -984,9 +1006,12 @@ def gravar_resultados_termociclador(
             resultado.gravados += 1
             resultado.campos_gravados += len(campos_para_gravar)
 
-            # Registra evento
-            for campo, valor in campos_para_gravar.items():
-                registrar_evento(con, chave, f"resultado_{campo}", str(valor))
+            # Registra evento ÚNICO por amostra com JSON (economia de linhas em eventos)
+            import json
+            registrar_evento(
+                con, chave, "resultado_termociclador",
+                json.dumps({"campos": conflitos_amostra}, ensure_ascii=False)
+            )
 
     con.commit()
     return resultado

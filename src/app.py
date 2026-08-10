@@ -116,8 +116,16 @@ def _badge_html(fase: str) -> str:
 
 
 def _ct_para_display(valor) -> str:
-    """Ct para exibição: None (não detectado) vira vazio, não 'None'."""
-    return "" if valor is None else f"{float(valor):.1f}"
+    """Ct para exibição: 
+    - None (não testado) -> vazio
+    - -1.0 (não detectado) -> 'ND' (Not Detected)
+    - >0 -> valor formatado com 1 casa decimal
+    """
+    if valor is None:
+        return ""
+    if valor == -1.0:
+        return "ND"
+    return f"{float(valor):.1f}"
 
 
 def _linha_para_dict(r) -> dict:
@@ -671,8 +679,9 @@ class App:
             # Busca valores atuais no banco para detectar conflitos
             chaves = list(resolvidas.keys())
             ph = db._placeholders(len(chaves))
+            todos_campos = (*db.COLUNAS_CT, *db.COLUNAS_CI)
             rows_atuais = self.con.execute(
-                f"SELECT chave, {', '.join(db.COLUNAS_CT)} FROM amostras WHERE chave IN ({ph})",
+                f"SELECT chave, {', '.join(todos_campos)} FROM amostras WHERE chave IN ({ph})",
                 chaves,
             ).fetchall()
             
@@ -682,7 +691,7 @@ class App:
             conflitos = []
             for chave, cts_novos in resolvidas.items():
                 atuais = atuais_por_chave.get(chave, {})
-                for campo in db.COLUNAS_CT:
+                for campo in todos_campos:
                     valor_novo = cts_novos.get(campo)
                     valor_atual = atuais.get(campo) if atuais else None
                     

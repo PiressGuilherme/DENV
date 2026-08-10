@@ -70,10 +70,12 @@ class TestParseArquivo1_4:
             assert amp.numero_sequencial > 0
             assert "den1_ct" in amp.cts
             assert "den4_ct" in amp.cts
-            assert "ci_ct" in amp.cts
+            assert "ci_1_4_ct" in amp.cts
             # DEN2 e DEN3 não estão neste arquivo
             assert amp.cts.get("den2_ct") is None
             assert amp.cts.get("den3_ct") is None
+            # ci_2_3_ct não está neste arquivo
+            assert amp.cts.get("ci_2_3_ct") is None
 
     def test_controles_ignorados(self):
         """CN e CP devem ser ignorados."""
@@ -102,10 +104,12 @@ class TestParseArquivo2_3:
             assert amp.numero_sequencial > 0
             assert "den2_ct" in amp.cts
             assert "den3_ct" in amp.cts
-            assert "ci_ct" in amp.cts
+            assert "ci_2_3_ct" in amp.cts
             # DEN1 e DEN4 não estão neste arquivo
             assert amp.cts.get("den1_ct") is None
             assert amp.cts.get("den4_ct") is None
+            # ci_1_4_ct não está neste arquivo
+            assert amp.cts.get("ci_1_4_ct") is None
 
 
 class TestMergeArquivos:
@@ -122,9 +126,9 @@ class TestMergeArquivos:
         assert not merged.erros
         assert len(merged.amostras) > 0
         
-        # Verifica que tem todos os 5 CTs
+        # Verifica que tem todos os 6 CTs (DEN1-4 + CI 1-4 + CI 2-3)
         for amp in merged.amostras:
-            for ct in ["den1_ct", "den2_ct", "den3_ct", "den4_ct", "ci_ct"]:
+            for ct in ["den1_ct", "den2_ct", "den3_ct", "den4_ct", "ci_1_4_ct", "ci_2_3_ct"]:
                 assert ct in amp.cts
         
         # Verifica que amostras dos dois arquivos casaram pelo Sample ID
@@ -145,10 +149,30 @@ class TestMergeArquivos:
         # Pelo menos um dos DEN1/DEN4 (arquivo 1-4) e um dos DEN2/DEN3 (arquivo 2-3)
         tem_1_4 = amp.cts["den1_ct"] is not None or amp.cts["den4_ct"] is not None
         tem_2_3 = amp.cts["den2_ct"] is not None or amp.cts["den3_ct"] is not None
-        tem_ci = amp.cts["ci_ct"] is not None
+        tem_ci_1_4 = amp.cts["ci_1_4_ct"] is not None
+        tem_ci_2_3 = amp.cts["ci_2_3_ct"] is not None
         
-        # Pelo menos CI deve estar presente (vem dos dois arquivos)
-        assert tem_ci
+        # Pelo menos um dos CI deve estar presente (vem dos dois arquivos)
+        assert tem_ci_1_4 or tem_ci_2_3
+
+    def test_sentinela_nao_detectado(self):
+        """Testa que '-' na planilha vira -1.0 (não detectado) e ausente vira None (não testado)."""
+        from src.parser_termociclador import _ct_para_float
+        import pandas as pd
+        
+        # "-" -> -1.0 (não detectado)
+        assert _ct_para_float("-") == -1.0
+        
+        # "" (vazio) -> None (não testado)
+        assert _ct_para_float("") is None
+        assert _ct_para_float(None) is None
+        assert _ct_para_float(pd.NA) is None
+        assert _ct_para_float(float("nan")) is None
+        
+        # Valor válido
+        assert _ct_para_float("25.5") == 25.5
+        assert _ct_para_float("25,5") == 25.5  # decimal BR
+        assert _ct_para_float(25.5) == 25.5
 
 
 class TestPrepararParaGravacao:

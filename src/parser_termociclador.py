@@ -4,8 +4,8 @@ Formato: aba 'Abs QuantResult' com colunas:
     Well, Sample ID, Sample, Sample Type, Dye, Gene, Test Name, Ct, ...
 
 Dois arquivos por corrida:
-    - Dengue 1-4: FAM=DEN4, VIC=DEN1, Cy5=CI
-    - Dengue 2-3: FAM=DEN2, VIC=DEN3, Cy5=CI
+    - Dengue 1-4: FAM=DEN4, VIC=DEN1, Cy5=CI (-> ci_1_4_ct)
+    - Dengue 2-3: FAM=DEN2, VIC=DEN3, Cy5=CI (-> ci_2_3_ct)
 
 Sample ID pode vir em 3 formatos:
     - 25346          -> prefixo="D", numero=25346, ano=None
@@ -13,6 +13,11 @@ Sample ID pode vir em 3 formatos:
     - D24745/26      -> prefixo="D", numero=24745, ano=2026
 
 Amostras com Sample Type != "Unknown" (CN, CP) são ignoradas.
+
+Valores de Ct:
+    - None = não testado (sorotipo não presente no arquivo / coluna ausente)
+    - -1.0 = não detectado (veio "-" na planilha)
+    - >0 = valor de Ct válido
 """
 
 from __future__ import annotations
@@ -31,7 +36,9 @@ class AmostraTermociclador:
     prefixo: str
     numero_sequencial: int
     ano_verdade: Optional[int]  # None se não veio no Sample ID
-    cts: dict[str, Optional[float]] = field(default_factory=dict)  # den1_ct, den2_ct, den3_ct, den4_ct, ci_ct
+    # den1_ct..den4_ct, ci_1_4_ct, ci_2_3_ct
+    # None = não testado, -1.0 = não detectado, >0 = Ct válido
+    cts: dict[str, Optional[float]] = field(default_factory=dict)
 
 
 @dataclass
@@ -43,21 +50,26 @@ class ResultadoParseTermociclador:
 
 
 # Mapeamento Dye -> Sorotipo por arquivo
+# CI é mapeado para coluna específica por arquivo (ci_1_4_ct ou ci_2_3_ct)
 MAPA_DYE_SOROTIPO = {
     "Dengue 1-4": {
         "FAM": "DEN4",
         "VIC": "DEN1",
-        "Cy5": "CI",
+        "Cy5": "CI_1_4",  # especial: vira ci_1_4_ct
     },
     "Dengue 2-3": {
         "FAM": "DEN2",
         "VIC": "DEN3",
-        "Cy5": "CI",
+        "Cy5": "CI_2_3",  # especial: vira ci_2_3_ct
     },
 }
 
-# Colunas de Ct do banco (para validação)
-COLUNAS_CT_ESPERADAS = {"den1_ct", "den2_ct", "den3_ct", "den4_ct", "ci_ct"}
+# Colunas de Ct do banco (DEN1-4)
+COLUNAS_CT_ESPERADAS = {"den1_ct", "den2_ct", "den3_ct", "den4_ct"}
+# Colunas de CI (uma por arquivo)
+COLUNAS_CI_ESPERADAS = {"ci_1_4_ct", "ci_2_3_ct"}
+# Todas as colunas esperadas no resultado final
+TODAS_COLUNAS_ESPERADAS = COLUNAS_CT_ESPERADAS | COLUNAS_CI_ESPERADAS
 
 
 def _normalizar_sample_id(sample_id: str) -> tuple[str, int, Optional[int]]:
@@ -98,7 +110,13 @@ def _normalizar_sample_id(sample_id: str) -> tuple[str, int, Optional[int]]:
 
 
 def _ct_para_float(valor) -> Optional[float]:
-    """Converte valor de Ct para float. '-' ou vazio -> None."""
+    """Converte valor de Ct para float.
+    
+    Retorna:
+        - None: não testado (valor ausente/NaN)
+        - -1.0: não detectado (veio "-" na planilha)
+        - float > 0: valor de Ct válido
+    """
     if valor is None:
         return None
     if isinstance(valor, float) and pd.isna(valor):
@@ -110,8 +128,10 @@ def _ct_para_float(valor) -> Optional[float]:
         pass
     
     s = str(valor).strip()
-    if not s or s == "-":
+    if not s:
         return None
+    if s == "-":
+        return -1.0  # sentinela: não detectado
     
     # Substitui vírgula por ponto (decimal BR)
     s = s.replace(",", ".")
@@ -266,9 +286,11 @@ def merge_arquivos_termociclador(
                 if val is not None and merged[key].cts.get(col) is None:
                     merged[key].cts[col] = val
     
-    # Garante que todas as colunas de CT existam em todas as amostras merged
+    # Garante que todas as colunas de CT e CI existam em todas as amostras merged
     for amp in merged.values():
         for col in COLUNAS_CT_ESPERADAS:
+            amp.cts.setdefault(col, None)
+        for col in COLUNAS_CI_ESPERADAS:
             amp.cts.setdefault(col, None)
     
     # Une sample_ids_sem_ano
