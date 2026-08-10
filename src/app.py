@@ -146,6 +146,10 @@ def _linha_para_dict(r) -> dict:
             db.coluna_ct(s): _ct_para_display(r[db.coluna_ct(s)])
             for s in db.SOROTIPOS
         },
+        **{
+            campo: _ct_para_display(r[campo])
+            for campo in db.COLUNAS_CI
+        },
         "flags": r["flags"] or "",
         "n_origem": r["n_origem"],
     }
@@ -182,6 +186,15 @@ def _colunas(*, com_motivo: bool = False, com_resultado: bool = False) -> tuple[
             {"headerName": f"{s} (Ct)", "field": db.coluna_ct(s),
              "type": "numericColumn", "width": 100}
             for s in db.SOROTIPOS
+        ]
+        # Controle Interno (duas colunas, uma por arquivo)
+        cols += [
+            {"headerName": f"{cab}", "field": campo,
+             "type": "numericColumn", "width": 100}
+            for campo, cab in (
+                (db.COLUNAS_CI[0], "CI 1-4 (Ct)"),
+                (db.COLUNAS_CI[1], "CI 2-3 (Ct)"),
+            )
         ]
     cols += [
         {"headerName": "Flags", "field": "flags", "filter": True, "width": 260},
