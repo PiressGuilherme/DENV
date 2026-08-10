@@ -554,8 +554,8 @@ class App:
 
     def _upload_arquivo_termociclador(self, estado: dict, chave_estado: str, label: str, callback) -> None:
         """Cria widget de upload para um arquivo do termociclador."""
-        def ao_subir(evento):
-            conteudo = evento.file.read()
+        async def ao_subir(evento):
+            conteudo = await evento.file.read()
             estado[chave_estado] = (evento.file.name, conteudo)
             ui.notify(f"{label}: {evento.file.name} carregado", type="positive")
             # Se já temos os dois arquivos, processa automaticamente
