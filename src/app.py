@@ -708,7 +708,8 @@ class App:
                     valor_novo = cts_novos.get(campo)
                     valor_atual = atuais.get(campo) if atuais else None
                     
-                    if valor_novo is not None and valor_atual is not None and valor_atual != valor_novo:
+                    if (valor_novo is not None and valor_atual is not None
+                            and not db.mesmo_ct(valor_atual, valor_novo)):
                         conflitos.append({
                             "chave": chave,
                             "campo": campo,
@@ -759,8 +760,6 @@ class App:
                     ).props("color=primary")
                 
                 ui.button("Cancelar", on_click=dialogo.close).props("flat")
-        
-        self._rodape_fechar(rodape, dialogo)
 
     def _confirmar_gravacao_termociclador(self, estado: dict, dialogo, checkboxes: dict) -> None:
         """Confirma a gravação dos resultados do termociclador."""
@@ -781,7 +780,10 @@ class App:
             
             # Monta mensagem de resultado
             msgs = []
-            msgs.append(f"✅ {resultado.gravados} amostra(s) atualizada(s) ({resultado.campos_gravados} campo(s))")
+            # O emoji acompanha o resultado: um ✅ fixo faria "0 atualizadas" ser
+            # lido como sucesso, que foi exatamente o que confundiu no campo.
+            icone = "✅" if resultado.gravados > 0 else "⚠️"
+            msgs.append(f"{icone} {resultado.gravados} amostra(s) atualizada(s) ({resultado.campos_gravados} campo(s))")
             if resultado.conflitos:
                 msgs.append(f"⚠️ {len(resultado.conflitos)} conflito(s) não autorizado(s) — não gravados")
             if resultado.nao_encontradas:

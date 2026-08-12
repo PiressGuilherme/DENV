@@ -149,4 +149,5 @@ def _linha_falsa() -> dict:
         "flags": "", "n_origem": 1, "rejeitada": 0, "data_resultado": None,
         **{e.chave: 0 for e in db.ETAPAS_DEF},
         **{c: None for c in db.COLUNAS_CT},
+        **{c: None for c in db.COLUNAS_CI},
     }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Iterable, Optional
 
 import psycopg2
@@ -173,6 +174,36 @@ COLUNAS_CI: tuple[str, ...] = ("ci_1_4_ct", "ci_2_3_ct")
 # -1.0 é valor sentinela para "não detectado" (Ct lido como "-" na planilha).
 CT_MIN = -1.0
 CT_MAX = 50.0
+
+# Casas decimais de Ct guardadas no banco (NUMERIC(6,2)).
+CT_DECIMAIS = 2
+
+
+def mesmo_ct(a, b) -> bool:
+    """True se dois valores de Ct são o mesmo na precisão em que são guardados.
+
+    O parser entrega o Ct cru do termociclador (18.746) e a coluna NUMERIC(6,2)
+    guarda 18.75. Comparar os dois diretamente marcaria como conflito toda
+    reimportação do mesmo arquivo — 202 falsos conflitos numa corrida de 94
+    amostras. A comparação é feita na precisão do banco, que é a única em que os
+    dois valores são comparáveis.
+    """
+    if a is None or b is None:
+        return a is None and b is None
+    return _quantizar_ct(a) == _quantizar_ct(b)
+
+
+def _quantizar_ct(valor) -> Decimal:
+    """Arredonda um Ct como o PostgreSQL faz ao gravar em NUMERIC(6,2).
+
+    ROUND_HALF_UP e não o round() do Python: o padrão do Python é bankers'
+    rounding, que leva 14.105 para 14.10 enquanto o Postgres grava 14.11. A
+    diferença só aparece no empate exato (.xx5), mas isso bastava para 14 dos
+    202 campos continuarem marcados como conflito numa reimportação idêntica.
+    """
+    return Decimal(str(valor)).quantize(
+        Decimal(1).scaleb(-CT_DECIMAIS), rounding=ROUND_HALF_UP
+    )
 
 CAMPOS_REPROCESSO = (
     *(e.chave for e in ETAPAS_DEF),
@@ -970,7 +1001,7 @@ def gravar_resultados_termociclador(
                     "sobrescrito": False,
                 })
                 tem_gravacao = True
-            elif valor_atual != valor_novo:
+            elif not mesmo_ct(valor_atual, valor_novo):
                 # Conflito: valor diferente do existente
                 if (chave, campo) in sobrescrever:
                     # Usuário autorizou sobrescrever
