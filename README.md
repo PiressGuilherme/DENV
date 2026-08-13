@@ -14,6 +14,11 @@ A aba **PCR feito** também importa resultados de PCR de uma planilha
 do que foi ignorado antes de confirmar. Resultado já existente **nunca** é
 sobrescrito.
 
+Na aba **Coletadas**, as amostras selecionadas podem gerar diretamente o mapa de
+trabalho de extração em uma placa de 96 poços. O arquivo preserva o formulário
+oficial, comporta até 94 amostras e reserva as duas últimas posições para CN e
+CP. Gerar o mapa não marca as amostras como extraídas.
+
 Stack: **NiceGUI + PostgreSQL (Neon) + pandas**. Acesso via navegador com login por e-mail e senha.
 
 > As regras de negócio e decisões de projeto estão em
@@ -32,6 +37,7 @@ DENV/
 │   ├── importer.py      # xlsx -> dedup -> PostgreSQL (idempotente)
 │   ├── db.py            # schema, queries, registro de etapas do fluxo
 │   ├── resultados.py    # import de resultados de PCR (Ct por sorotipo)
+│   ├── extracao.py      # geração do mapa de trabalho de extração (94 + CN/CP)
 │   ├── export.py        # export da visão atual em xlsx/csv
 │   └── app.py           # UI NiceGUI (abas por fase, filtros, lote, export)
 ├── scripts/
@@ -247,5 +253,4 @@ tirar o estado atual:
 - **Porta local**: padrão 8080. Para mudar: variável `PORT` ou ajuste em `src/app.py`.
 - **Autenticação**: ativada automaticamente quando `APP_EMAIL` e `APP_PASS` estão definidos.
   Localmente (sem essas variáveis), o acesso é direto.
-
 

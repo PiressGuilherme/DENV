@@ -12,6 +12,7 @@ Cobrem duas coisas que os testes de src/resultados.py NÃO pegam:
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import inspect
 
@@ -126,6 +127,64 @@ class TestBadgesEAbas:
     def test_cards_nao_incluem_a_geral(self):
         assert app._FASE_GERAL not in app._FASES_COM_CARD
         assert set(app._FASES_COM_CARD) <= set(db.FASES)
+
+
+class TestMapaExtracaoNaUI:
+    def test_botao_e_exclusivo_da_aba_coletadas(self):
+        fonte = inspect.getsource(app.FaseTab._montar)
+        assert '"Gerar Extração"' in fonte
+        assert "self.fase == db.ETAPAS[0]" in fonte
+
+    def test_gerar_mapa_nao_avanca_fase(self):
+        fonte = inspect.getsource(app.App._baixar_mapa_extracao)
+        assert "extracao.gerar_mapa_extracao" in fonte
+        assert "ui.download" in fonte
+        assert "avancar_fase" not in fonte
+        assert "registrar_evento" not in fonte
+
+    def test_selecao_vazia_exibe_aviso_sem_abrir_dialogo(self, monkeypatch):
+        class GridVazia:
+            async def get_selected_rows(self):
+                return []
+
+        avisos = []
+        monkeypatch.setattr(app.ui, "notify", lambda mensagem, **kwargs: avisos.append(mensagem))
+        instancia = object.__new__(app.App)
+        tab = type("Tab", (), {"grid": GridVazia()})()
+
+        asyncio.run(instancia.abrir_dialogo_extracao(tab))
+
+        assert avisos == ["Selecione ao menos uma amostra."]
+
+    def test_download_usa_xlsx_e_nao_precisa_de_conexao_com_banco(self, monkeypatch):
+        class Dialogo:
+            fechado = False
+
+            def close(self):
+                self.fechado = True
+
+        downloads = []
+        avisos = []
+        monkeypatch.setattr(app.ui, "download", lambda *args: downloads.append(args))
+        monkeypatch.setattr(app.ui, "notify", lambda mensagem, **kwargs: avisos.append(mensagem))
+        instancia = object.__new__(app.App)
+        dialogo = Dialogo()
+
+        instancia._baixar_mapa_extracao(
+            dialogo,
+            [app.extracao.AmostraExtracao("D447/26", 447, 2026)],
+            "2026-08-13",
+            1,
+            "Guilherme",
+        )
+
+        assert dialogo.fechado is True
+        assert len(downloads) == 1
+        conteudo, nome, media = downloads[0]
+        assert conteudo.startswith(b"PK")
+        assert nome.endswith("13_08_2026.xlsx")
+        assert "spreadsheetml.sheet" in media
+        assert avisos == ["Mapa DENV130826-1 gerado com 1 amostra(s)."]
 
 
 class TestFormatacao:

@@ -29,13 +29,13 @@ from __future__ import annotations
 import os
 import threading
 import time
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from nicegui import app as _nicegui_app
 from nicegui import ui
 
-from src import auth, db, export, resultados, parser_termociclador
+from src import auth, db, export, extracao, resultados, parser_termociclador
 
 
 def _startup_db() -> None:
@@ -223,6 +223,13 @@ class FaseTab:
                     icon="arrow_forward",
                     on_click=lambda: self.app.avancar(self, etapa),
                 ).props("color=primary")
+            # O mapa é preparado antes da extração e não altera a fase no banco.
+            if self.fase == db.ETAPAS[0]:
+                ui.button(
+                    "Gerar Extração",
+                    icon="description",
+                    on_click=lambda: self.app.abrir_dialogo_extracao(self),
+                ).props("color=secondary outline")
             # Rejeitar: só na Geral (rejeita amostras pendentes).
             if self.fase == _FASE_GERAL:
                 ui.button(
@@ -387,6 +394,99 @@ class App:
         n = db.retroceder_fase(self.con, chaves, etapa)
         ui.notify(f"{n} amostra(s) retrocedida(s) de {db.LABEL_FASE[etapa]}.", type="positive")
         self.refresh()
+
+    async def abrir_dialogo_extracao(self, tab: FaseTab) -> None:
+        """Solicita os metadados e gera o mapa das amostras coletadas."""
+        rows = await tab.grid.get_selected_rows()
+        amostras = [
+            extracao.AmostraExtracao(
+                chave=row["chave"],
+                numero_sequencial=row["numero"],
+                ano_verdade=row["ano"],
+            )
+            for row in rows
+        ]
+        try:
+            amostras = extracao.validar_amostras(amostras)
+        except extracao.ErroMapaExtracao as e:
+            ui.notify(str(e), type="warning", timeout=8000)
+            return
+
+        with ui.dialog() as dialogo, ui.card().classes("w-[34rem]"):
+            with ui.row().classes("w-full items-center no-wrap"):
+                ui.label("Gerar mapa de extração").classes("text-bold text-lg")
+                ui.space()
+                ui.button(icon="close", on_click=dialogo.close).props("flat round dense")
+
+            ui.label(
+                f"{len(amostras)} amostra(s) selecionada(s). O mapa comporta "
+                f"até {extracao.MAX_AMOSTRAS}; CN e CP serão adicionados automaticamente."
+            ).classes("text-grey-7 text-sm")
+
+            with ui.row().classes("w-full gap-4 q-mt-sm"):
+                data_input = ui.input(
+                    "Data da extração", value=date.today().isoformat()
+                ).props("type=date dense").classes("grow")
+                placa_input = ui.number(
+                    "Número da placa", value=1, min=1, step=1
+                ).props("dense").classes("w-40")
+
+            operador_input = ui.select(
+                list(extracao.OPERADORES),
+                label="Operador (opcional)",
+                value=None,
+            ).props("dense clearable").classes("w-full")
+
+            ui.label(
+                "O arquivo será somente baixado; as amostras não serão marcadas "
+                "como Extraídas automaticamente."
+            ).classes("text-grey-7 text-sm")
+
+            with ui.row().classes("w-full justify-end gap-2 q-mt-md"):
+                ui.button("Cancelar", on_click=dialogo.close).props("flat")
+                ui.button(
+                    "Baixar mapa",
+                    icon="download",
+                    on_click=lambda: self._baixar_mapa_extracao(
+                        dialogo,
+                        amostras,
+                        data_input.value,
+                        placa_input.value,
+                        operador_input.value,
+                    ),
+                ).props("color=primary")
+        dialogo.open()
+
+    def _baixar_mapa_extracao(
+        self,
+        dialogo,
+        amostras: list[extracao.AmostraExtracao],
+        data_valor,
+        numero_placa,
+        operador: Optional[str],
+    ) -> None:
+        try:
+            data_extracao = date.fromisoformat(str(data_valor))
+            mapa = extracao.gerar_mapa_extracao(
+                amostras,
+                data_extracao=data_extracao,
+                numero_placa=numero_placa,
+                operador=operador,
+            )
+        except (TypeError, ValueError) as e:
+            ui.notify(f"Não foi possível gerar o mapa: {e}", type="negative", timeout=8000)
+            return
+
+        dialogo.close()
+        ui.download(
+            mapa.conteudo,
+            mapa.nome_arquivo,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        ui.notify(
+            f"Mapa {mapa.ensaio} gerado com {mapa.quantidade_amostras} amostra(s).",
+            type="positive",
+        )
 
     async def abrir_dialogo_rejeicao(self, tab: FaseTab) -> None:
         """Abre diálogo para escolher o motivo e rejeitar a seleção (só pendentes)."""

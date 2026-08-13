@@ -234,6 +234,21 @@ Botão "Exportar" por aba → **xlsx/csv da visão atual** (fase + filtro + orde
 `src/export.py` e `ui.download`. Só colunas do reprocesso (NI, número, ano, município, datas,
 fase, etapas Sim/Não, motivo de rejeição, flags, n_origem) — **nunca** as colunas antigas.
 
+### 6.5 Mapa de trabalho para extração
+
+Na aba **Coletadas**, a seleção múltipla oferece a ação **Gerar Extração**. Ela gera um XLSX
+a partir do modelo oficial versionado em `data/modelos/mapa_extracao.xlsx`, sem alterar a fase
+das amostras nem registrar evento de avanço.
+
+- Uma placa recebe de 1 a 94 amostras; as posições 95 e 96 são sempre `CN` e `CP`.
+- O preenchimento segue a ordem canônica por número sequencial e a ordem de poços
+  `A1, B1, ... H1, A2, ... H12` do formulário.
+- O Número Interno é escrito sem prefixo e sem zero artificial (`D447/26` → `447/26`).
+- O mapa de 2026 recusa amostras de outro ano em vez de alterar silenciosamente o NI.
+- O ensaio segue `DENVDDMMAA-N`, com data, número da placa e operador informados no diálogo.
+- Fórmulas, estilos, mesclagens, validações e configuração de impressão vêm do modelo e devem
+  ser preservados no arquivo gerado.
+
 ---
 
 ## 7. Importador (`importer.py`) — comportamento exigido
