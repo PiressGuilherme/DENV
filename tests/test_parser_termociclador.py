@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill
 
 from src.parser_termociclador import (
     AmostraTermociclador,
     ResultadoParseTermociclador,
+    _extrair_linhas_por_cabecalho,
     _normalizar_sample_id,
     merge_arquivos_termociclador,
     parse_arquivo_termociclador,
@@ -18,12 +23,69 @@ from src.parser_termociclador import (
 # Arquivos de teste na pasta docs
 DOCS = Path(__file__).parent.parent / "docs"
 ARQUIVO_1_4 = DOCS / "Dengue 1-4 030826_Abs Quant(Stage2_Step2).xlsx"
+ARQUIVO_1_4_REGRAVADO = DOCS / "Dengue 1-4 3006261_Abs Quant(Stage2_Step2).xlsx"
 ARQUIVO_2_3 = DOCS / "Dengue 2-3 030826_Abs Quant(Stage2_Step2).xlsx"
 
 ARQUIVOS_EXISTEM = ARQUIVO_1_4.exists() and ARQUIVO_2_3.exists()
-pytestmark = pytest.mark.skipif(
+requer_arquivos_exemplo = pytest.mark.skipif(
     not ARQUIVOS_EXISTEM, reason="Arquivos de exemplo não encontrados em docs/"
 )
+requer_arquivos_1_4 = pytest.mark.skipif(
+    not (ARQUIVO_1_4.exists() and ARQUIVO_1_4_REGRAVADO.exists()),
+    reason="Arquivos Dengue 1-4 de regressão não encontrados em docs/",
+)
+
+
+def _xlsx_com_linhas_esparsas() -> bytes:
+    """Cria planilha em que os dados começam em B e A não existe no XML."""
+    workbook = Workbook()
+    resultado = workbook.active
+    resultado.title = "Abs QuantResult"
+
+    for coluna, valor in enumerate(
+        ("Well", "Sample ID", "Sample", "Sample Type", "Dye", "Gene", "Ct"),
+        start=2,
+    ):
+        resultado.cell(1, coluna, valor)
+
+    # Controle com caixa/espaços variados: deve ser ignorado antes de interpretar
+    # "CN" como um identificador de amostra.
+    for coluna, valor in {
+        2: "G12", 3: " cn ", 4: "CN", 5: " unknown ",
+        6: " fam ", 7: "DEN4", 8: "-",
+    }.items():
+        resultado.cell(2, coluna, valor)
+
+    # ID numérico integral e classificadores normalizados pelo parser.
+    for coluna, valor in {
+        2: "A1", 3: 24745.0, 4: "24745", 5: " unknown ",
+        6: " cy5 ", 7: "CI", 8: 18.5,
+    }.items():
+        resultado.cell(3, coluna, valor)
+    for coluna, valor in {
+        2: "A1", 3: 24745.0, 4: "24745", 5: "UNKNOWN",
+        6: "FAM", 7: "DEN4", 8: "-",
+    }.items():
+        resultado.cell(4, coluna, valor)
+
+    # Célula fisicamente presente apenas por estilo: não é um registro válido.
+    resultado["A1000"].fill = PatternFill(fill_type="solid", fgColor="FFFFFF")
+
+    estatisticas = workbook.create_sheet("Abs QuantStatistics")
+    for coluna, valor in enumerate(
+        ("Replicate", "Well", "Sample", "Sample Type", "Dye", "Gene"),
+        start=1,
+    ):
+        estatisticas.cell(1, coluna, valor)
+    for coluna, valor in {
+        2: "G12", 3: "CN", 4: "Negative", 5: "FAM", 6: "DEN4",
+    }.items():
+        estatisticas.cell(251, coluna, valor)
+
+    buffer = BytesIO()
+    workbook.save(buffer)
+    workbook.close()
+    return buffer.getvalue()
 
 
 class TestNormalizarSampleId:
@@ -53,6 +115,86 @@ class TestNormalizarSampleId:
             _normalizar_sample_id(sample_id)
 
 
+class TestLinhasEsparsas:
+    """Regressões independentes dos arquivos reais de bancada."""
+
+    def test_celula_a_ausente_nao_desloca_controle_cn(self):
+        conteudo = _xlsx_com_linhas_esparsas()
+
+        with ZipFile(BytesIO(conteudo)) as arquivo:
+            xml = arquivo.read("xl/worksheets/sheet2.xml")
+        assert b'r="B251"' in xml
+        assert b'r="A251"' not in xml
+
+        linhas = _extrair_linhas_por_cabecalho(
+            conteudo,
+            "Abs QuantStatistics",
+            ("Well", "Sample", "Sample Type", "Dye", "Gene"),
+        )
+
+        assert linhas == [{
+            "Well": "G12",
+            "Sample": "CN",
+            "Sample Type": "Negative",
+            "Dye": "FAM",
+            "Gene": "DEN4",
+        }]
+
+    def test_parser_ignora_controle_e_linhas_fisicas_vazias(self):
+        conteudo = _xlsx_com_linhas_esparsas()
+        linhas = _extrair_linhas_por_cabecalho(
+            conteudo,
+            "Abs QuantResult",
+            ("Well", "Sample ID", "Sample", "Sample Type", "Dye", "Gene", "Ct"),
+        )
+        assert len(linhas) == 3
+
+        resultado = parse_arquivo_termociclador(conteudo, "Dengue 1-4 teste.xlsx")
+
+        assert not resultado.erros
+        assert len(resultado.amostras) == 1
+        amostra = resultado.amostras[0]
+        assert (amostra.prefixo, amostra.numero_sequencial) == ("D", 24745)
+        assert amostra.cts["ci_1_4_ct"] == 18.5
+        assert amostra.cts["den4_ct"] == -1.0
+
+
+@requer_arquivos_1_4
+class TestCompatibilidadeArquivos1_4:
+    """Compara o original do equipamento com o XLSX regravado."""
+
+    @staticmethod
+    def _controles(path: Path) -> list[tuple[object, ...]]:
+        linhas = _extrair_linhas_por_cabecalho(
+            path.read_bytes(),
+            "Abs QuantStatistics",
+            ("Well", "Sample", "Sample Type", "Dye", "Gene"),
+        )
+        return [
+            tuple(linha[c] for c in ("Well", "Sample", "Sample Type", "Dye", "Gene"))
+            for linha in linhas
+            if str(linha["Sample"] or "").strip().upper() == "CN"
+        ]
+
+    def test_controles_cn_tem_a_mesma_interpretacao_logica(self):
+        esperado = [
+            ("G12", "CN", "Negative", "FAM", "DEN4"),
+            ("G12", "CN", "Negative", "VIC", "DEN1"),
+            ("G12", "CN", "Negative", "Cy5", "CI"),
+        ]
+        assert self._controles(ARQUIVO_1_4) == esperado
+        assert self._controles(ARQUIVO_1_4_REGRAVADO) == esperado
+
+    @pytest.mark.parametrize("path", [ARQUIVO_1_4, ARQUIVO_1_4_REGRAVADO])
+    def test_parser_processa_original_e_regravado(self, path):
+        resultado = parse_arquivo_termociclador(path.read_bytes(), path.name)
+
+        assert not resultado.erros
+        assert len(resultado.amostras) == 94
+        assert all(amostra.prefixo not in {"CN", "CP"} for amostra in resultado.amostras)
+
+
+@requer_arquivos_exemplo
 class TestParseArquivo1_4:
     """Testes do parse do arquivo Dengue 1-4."""
 
@@ -87,6 +229,7 @@ class TestParseArquivo1_4:
             assert amp.prefixo not in ("CN", "CP")
 
 
+@requer_arquivos_exemplo
 class TestParseArquivo2_3:
     """Testes do parse do arquivo Dengue 2-3."""
 
@@ -112,6 +255,7 @@ class TestParseArquivo2_3:
             assert amp.cts.get("ci_1_4_ct") is None
 
 
+@requer_arquivos_exemplo
 class TestMergeArquivos:
     """Testes do merge dos dois arquivos."""
 
@@ -175,6 +319,7 @@ class TestMergeArquivos:
         assert _ct_para_float(25.5) == 25.5
 
 
+@requer_arquivos_exemplo
 class TestPrepararParaGravacao:
     """Testes da preparação para gravação no banco."""
 
@@ -211,6 +356,7 @@ class TestPrepararParaGravacao:
 
 # Teste de integração rápido (roda só se tiver DATABASE_URL)
 @pytest.mark.integracao
+@requer_arquivos_exemplo
 class TestIntegracaoBanco:
     """Testes de integração com banco real (precisa DATABASE_URL)."""
 

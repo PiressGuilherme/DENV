@@ -24,10 +24,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+from openpyxl import load_workbook
 
 
 @dataclass
@@ -55,14 +57,24 @@ MAPA_DYE_SOROTIPO = {
     "Dengue 1-4": {
         "FAM": "DEN4",
         "VIC": "DEN1",
-        "Cy5": "CI_1_4",  # especial: vira ci_1_4_ct
+        "CY5": "CI_1_4",  # especial: vira ci_1_4_ct
     },
     "Dengue 2-3": {
         "FAM": "DEN2",
         "VIC": "DEN3",
-        "Cy5": "CI_2_3",  # especial: vira ci_2_3_ct
+        "CY5": "CI_2_3",  # especial: vira ci_2_3_ct
     },
 }
+
+CABECALHOS_RESULTADO = (
+    "Well",
+    "Sample ID",
+    "Sample",
+    "Sample Type",
+    "Dye",
+    "Gene",
+    "Ct",
+)
 
 # Colunas de Ct do banco (DEN1-4)
 COLUNAS_CT_ESPERADAS = {"den1_ct", "den2_ct", "den3_ct", "den4_ct"}
@@ -70,6 +82,92 @@ COLUNAS_CT_ESPERADAS = {"den1_ct", "den2_ct", "den3_ct", "den4_ct"}
 COLUNAS_CI_ESPERADAS = {"ci_1_4_ct", "ci_2_3_ct"}
 # Todas as colunas esperadas no resultado final
 TODAS_COLUNAS_ESPERADAS = COLUNAS_CT_ESPERADAS | COLUNAS_CI_ESPERADAS
+AMOSTRAS_CONTROLE = {"CN", "CP"}
+
+
+def _valor_ausente(valor) -> bool:
+    """Retorna True para None/NaN/pd.NA sem confundir zero com vazio."""
+    if valor is None:
+        return True
+    try:
+        return bool(pd.isna(valor))
+    except (TypeError, ValueError):
+        return False
+
+
+def _normalizar_texto(valor, *, upper: bool = False) -> str:
+    """Normaliza texto usado em comparações, preservando valores numéricos."""
+    if _valor_ausente(valor):
+        return ""
+    texto = str(valor).strip()
+    return texto.upper() if upper else texto
+
+
+def _normalizar_cabecalho(valor) -> str:
+    """Normaliza caixa e espaços de um cabeçalho sem depender de estilo."""
+    return re.sub(r"\s+", " ", _normalizar_texto(valor)).casefold()
+
+
+def _extrair_linhas_por_cabecalho(
+    conteudo: bytes,
+    nome_aba: str,
+    cabecalhos: tuple[str, ...],
+) -> list[dict[str, object]]:
+    """Extrai linhas usando a coluna real de cada cabeçalho.
+
+    O openpyxl materializa células por suas coordenadas (por exemplo, ``B251``),
+    portanto uma célula ``A251`` ausente no XML continua sendo logicamente vazia
+    e não desloca as demais. O cabeçalho pode estar em qualquer linha; linhas sem
+    nenhum valor nos campos solicitados são descartadas.
+    """
+    workbook = load_workbook(BytesIO(conteudo), read_only=False, data_only=True)
+    try:
+        if nome_aba not in workbook.sheetnames:
+            raise ValueError(f"Aba '{nome_aba}' não encontrada na planilha")
+
+        sheet = workbook[nome_aba]
+        esperados = {_normalizar_cabecalho(nome): nome for nome in cabecalhos}
+        colunas: dict[str, int] = {}
+        melhor_conjunto: set[str] = set()
+        linha_cabecalho: Optional[int] = None
+
+        # No modo normal, max_row/max_column são calculados a partir das células
+        # efetivamente carregadas, e não do <dimension> declarado pelo produtor.
+        for row in sheet.iter_rows():
+            encontrados: dict[str, int] = {}
+            for cell in row:
+                nome = esperados.get(_normalizar_cabecalho(cell.value))
+                if nome is not None:
+                    encontrados[nome] = cell.column
+            if len(encontrados) > len(melhor_conjunto):
+                melhor_conjunto = set(encontrados)
+            if set(cabecalhos).issubset(encontrados):
+                colunas = encontrados
+                linha_cabecalho = row[0].row
+                break
+
+        if linha_cabecalho is None:
+            faltando = [nome for nome in cabecalhos if nome not in melhor_conjunto]
+            raise ValueError(
+                "Colunas faltando na planilha: " + ", ".join(faltando)
+            )
+
+        linhas: list[dict[str, object]] = []
+        for row in sheet.iter_rows(min_row=linha_cabecalho + 1):
+            # O dicionário é indexado pelo número real da coluna da célula. Não
+            # usamos a posição da célula dentro da sequência XML.
+            valores_por_coluna = {cell.column: cell.value for cell in row}
+            valores = {
+                nome: valores_por_coluna.get(numero_coluna)
+                for nome, numero_coluna in colunas.items()
+            }
+            if all(_valor_ausente(valor) for valor in valores.values()):
+                continue
+            linhas.append(valores)
+
+        return linhas
+    finally:
+        workbook.close()
 
 
 def _normalizar_sample_id(sample_id: str) -> tuple[str, int, Optional[int]]:
@@ -171,42 +269,44 @@ def parse_arquivo_termociclador(
     
     mapa_dye = MAPA_DYE_SOROTIPO[tipo]
     
-    import io
     try:
-        df = pd.read_excel(io.BytesIO(conteudo), sheet_name="Abs QuantResult", dtype=object)
+        linhas = _extrair_linhas_por_cabecalho(
+            conteudo,
+            "Abs QuantResult",
+            CABECALHOS_RESULTADO,
+        )
     except Exception as e:
         return ResultadoParseTermociclador(
             erros=[f"Erro ao ler aba 'Abs QuantResult': {e}"]
-        )
-    
-    # Valida colunas esperadas
-    colunas_esperadas = {"Sample ID", "Sample Type", "Dye", "Gene", "Ct"}
-    if not colunas_esperadas.issubset(set(df.columns)):
-        faltando = colunas_esperadas - set(df.columns)
-        return ResultadoParseTermociclador(
-            erros=[f"Colunas faltando na planilha: {', '.join(faltando)}"]
         )
     
     # Agrupa por Sample ID
     amostras_dict: dict[tuple[str, int, Optional[int]], AmostraTermociclador] = {}
     sample_ids_sem_ano_set: set[str] = set()
     
-    for _, row in df.iterrows():
+    for row in linhas:
         sample_id_raw = row.get("Sample ID")
-        sample_type = row.get("Sample Type")
-        dye = row.get("Dye")
-        gene = row.get("Gene")
+        sample = _normalizar_texto(row.get("Sample"), upper=True)
+        sample_type = _normalizar_texto(row.get("Sample Type"), upper=True)
+        dye = _normalizar_texto(row.get("Dye"), upper=True)
+        gene = _normalizar_texto(row.get("Gene"), upper=True)
         ct_raw = row.get("Ct")
         
         # Ignora controles (CN, CP) e linhas sem Sample ID
-        if not sample_id_raw or pd.isna(sample_id_raw):
+        if _valor_ausente(sample_id_raw) or not _normalizar_texto(sample_id_raw):
             continue
-        if sample_type not in ("Unknown", "unknown", "UNKNOWN"):
+        sample_id_classificacao = _normalizar_texto(sample_id_raw, upper=True)
+        if sample in AMOSTRAS_CONTROLE or sample_id_classificacao in AMOSTRAS_CONTROLE:
+            continue
+        if sample_type != "UNKNOWN":
             continue
         
         # Normaliza Sample ID
         try:
-            prefixo, numero, ano = _normalizar_sample_id(str(sample_id_raw))
+            sample_id = _normalizar_texto(sample_id_raw)
+            if isinstance(sample_id_raw, float) and sample_id_raw.is_integer():
+                sample_id = str(int(sample_id_raw))
+            prefixo, numero, ano = _normalizar_sample_id(sample_id)
         except ValueError as e:
             return ResultadoParseTermociclador(
                 erros=[f"Sample ID inválido na linha: {sample_id_raw} - {e}"]
@@ -223,7 +323,7 @@ def parse_arquivo_termociclador(
         # Valida faixa de Ct
         if ct_valor is not None:
             from src.db import CT_MIN, CT_MAX
-            if not (CT_MIN < ct_valor <= CT_MAX):
+            if not (CT_MIN <= ct_valor <= CT_MAX):
                 ct_valor = None  # Fora da faixa plausível -> trata como não detectado
         
         # Chave de agrupamento
