@@ -6,6 +6,7 @@ from datetime import date
 from io import BytesIO
 
 from openpyxl import load_workbook
+from openpyxl.cell.rich_text import CellRichText, TextBlock
 import pytest
 
 from src import extracao
@@ -28,7 +29,9 @@ def _abrir_gerado(amostras, **kwargs):
         data_extracao=DATA_EXTRACAO,
         **kwargs,
     )
-    return mapa, load_workbook(BytesIO(mapa.conteudo), data_only=False)
+    return mapa, load_workbook(
+        BytesIO(mapa.conteudo), data_only=False, rich_text=True
+    )
 
 
 class TestRegrasDaPlaca:
@@ -205,7 +208,9 @@ class TestPreservacaoDoModelo:
             workbook.close()
 
     def test_geracao_preserva_estrutura_formulas_e_estilos(self):
-        modelo = load_workbook(extracao.MODELO_MAPA_EXTRACAO, data_only=False)
+        modelo = load_workbook(
+            extracao.MODELO_MAPA_EXTRACAO, data_only=False, rich_text=True
+        )
         _, gerado = _abrir_gerado([_amostra(447)], operador="Anna")
         try:
             assert gerado.sheetnames == modelo.sheetnames
@@ -215,11 +220,57 @@ class TestPreservacaoDoModelo:
                 )
             assert gerado["Extração"]["C6"].value == "=Amostras!A2"
             assert gerado["Extração"]["N13"].value == "=Amostras!L9"
-            assert gerado["Extração"]["L4"].value == '="Ensaio: "&Amostras!B1'
+            assert gerado["Extração"]["L4"].value == '=concat("Ensaio: ",Amostras!B1)'
             assert gerado.calculation.fullCalcOnLoad is True
             assert gerado.calculation.forceFullCalc is True
         finally:
             modelo.close()
+            gerado.close()
+
+    def test_geracao_preserva_tamanhos_de_fonte_do_texto_rico(self):
+        _, gerado = _abrir_gerado([_amostra(447)])
+        try:
+            formulario = gerado["Extração"]["D2"].value
+            pagina = gerado["Extração"]["M1"].value
+            assert isinstance(formulario, CellRichText)
+            assert isinstance(pagina, CellRichText)
+
+            runs_formulario = [
+                (parte.text, parte.font.sz, parte.font.b)
+                for parte in formulario
+                if isinstance(parte, TextBlock)
+            ]
+            runs_pagina = [
+                (parte.text, parte.font.sz, parte.font.b)
+                for parte in pagina
+                if isinstance(parte, TextBlock)
+            ]
+            assert runs_formulario == [
+                ("FORMULÁRIO", 8.0, False),
+                ("\n", 8.0, True),
+                ("LACEN/CEVS", 10.0, True),
+                ("\n", 12.0, True),
+            ]
+            assert runs_pagina == [
+                ("REVISÃO", 12.0, False),
+                ("\n00\n\n", 12.0, True),
+                ("Página 1 de 1", 7.0, False),
+            ]
+        finally:
+            gerado.close()
+
+    def test_dropdowns_de_kit_e_operador_permanecem_no_xlsx(self):
+        _, gerado = _abrir_gerado([_amostra(447)])
+        try:
+            validacoes = {
+                str(dv.sqref): dv
+                for dv in gerado["Extração"].data_validations.dataValidation
+            }
+            assert validacoes["C4"].type == "list"
+            assert "Loccus" in validacoes["C4"].formula1
+            assert validacoes["K16"].type == "list"
+            assert "Guilherme" in validacoes["K16"].formula1
+        finally:
             gerado.close()
 
     def test_modelo_faz_parte_da_arvore_data_copiada_pelo_docker(self):

@@ -158,6 +158,19 @@ class TestTriagemContraBancoReal:
 
 
 class TestFiltroSorotipo:
+    def test_predicados_sql_exigem_ct_positivo(self):
+        where, params = db.construir_filtro(sorotipo="DEN1")
+        assert where == "den1_ct > 0"
+        assert params == []
+
+        where, params = db.construir_filtro(sorotipo=db.SOROTIPO_NAO_DETECTADO)
+        assert "data_resultado IS NOT NULL" in where
+        assert all(
+            f"({campo} IS NULL OR {campo} <= 0)" in where
+            for campo in db.COLUNAS_CT
+        )
+        assert params == []
+
     def test_filtra_por_sorotipo(self, con):
         _ate_pcr(con, "D1/25", "D2/25")
         _importar(con, {"NI": ["D1/25", "D2/25"],
@@ -173,6 +186,31 @@ class TestFiltroSorotipo:
         where, params = db.construir_filtro(sorotipo=db.SOROTIPO_NAO_DETECTADO)
         chaves = {r["chave"] for r in db.listar_amostras(con, where=where, params=params)}
         assert chaves == {"D1/25"}
+
+    def test_sentinela_termociclador_nao_conta_como_detectado(self, con):
+        _ate_pcr(con, "D1/25", "D2/25")
+        db.gravar_resultados_termociclador(con, {
+            "D1/25": {c: -1.0 for c in db.COLUNAS_CT},
+            "D2/25": {"den1_ct": -1.0, "den2_ct": 24.3},
+        })
+
+        where, params = db.construir_filtro(sorotipo="DEN1")
+        positivos_den1 = {
+            r["chave"] for r in db.listar_amostras(con, where=where, params=params)
+        }
+        assert positivos_den1 == set()
+
+        where, params = db.construir_filtro(sorotipo="DEN2")
+        positivos_den2 = {
+            r["chave"] for r in db.listar_amostras(con, where=where, params=params)
+        }
+        assert positivos_den2 == {"D2/25"}
+
+        where, params = db.construir_filtro(sorotipo=db.SOROTIPO_NAO_DETECTADO)
+        negativos = {
+            r["chave"] for r in db.listar_amostras(con, where=where, params=params)
+        }
+        assert negativos == {"D1/25"}
 
     def test_filtra_com_e_sem_resultado(self, con):
         _ate_pcr(con, "D1/25", "D2/25")

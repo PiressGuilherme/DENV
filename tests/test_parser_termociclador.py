@@ -10,6 +10,7 @@ import pytest
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 
+from src import resultados
 from src.parser_termociclador import (
     AmostraTermociclador,
     ResultadoParseTermociclador,
@@ -88,6 +89,23 @@ def _xlsx_com_linhas_esparsas() -> bytes:
     return buffer.getvalue()
 
 
+def _xlsx_amostra_23424(alvos: tuple[tuple[str, str, object], ...]) -> bytes:
+    """Cria uma corrida mínima com a estrutura lógica da amostra D23424/25."""
+    workbook = Workbook()
+    resultado = workbook.active
+    resultado.title = "Abs QuantResult"
+    resultado.append(
+        ("Well", "Sample ID", "Sample", "Sample Type", "Dye", "Gene", "Ct")
+    )
+    for dye, gene, ct in alvos:
+        resultado.append(("A4", 23424, "23424", "Unknown", dye, gene, ct))
+
+    buffer = BytesIO()
+    workbook.save(buffer)
+    workbook.close()
+    return buffer.getvalue()
+
+
 class TestNormalizarSampleId:
     """Testes da normalização de Sample ID."""
 
@@ -157,6 +175,39 @@ class TestLinhasEsparsas:
         assert (amostra.prefixo, amostra.numero_sequencial) == ("D", 24745)
         assert amostra.cts["ci_1_4_ct"] == 18.5
         assert amostra.cts["den4_ct"] == -1.0
+
+
+class TestRegressaoAmostra23424:
+    def test_negativos_nao_viram_coinfeccao_denv_1_2_3_4(self):
+        arquivo_1_4 = _xlsx_amostra_23424((
+            ("FAM", "DEN4", "-"),
+            ("VIC", "DEN1", "-"),
+            ("Cy5", "CI", 12.598),
+        ))
+        arquivo_2_3 = _xlsx_amostra_23424((
+            ("FAM", "DEN2", "-"),
+            ("VIC", "DEN3", "-"),
+            ("Cy5", "CI", 12.066),
+        ))
+
+        merged = merge_arquivos_termociclador(
+            parse_arquivo_termociclador(arquivo_1_4, "Dengue 1-4 teste.xlsx"),
+            parse_arquivo_termociclador(arquivo_2_3, "Dengue 2-3 teste.xlsx"),
+        )
+
+        assert not merged.erros
+        assert len(merged.amostras) == 1
+        amostra = merged.amostras[0]
+        assert amostra.numero_sequencial == 23424
+        assert {amostra.cts[c] for c in (
+            "den1_ct", "den2_ct", "den3_ct", "den4_ct"
+        )} == {-1.0}
+        assert amostra.cts["ci_1_4_ct"] == 12.598
+        assert amostra.cts["ci_2_3_ct"] == 12.066
+        assert resultados.sorotipo_de({
+            **amostra.cts,
+            "data_resultado": "2026-08-14",
+        }) == "Não detectado"
 
 
 @requer_arquivos_1_4

@@ -37,6 +37,7 @@ _COLUNAS_CI: tuple[tuple[str, str], ...] = (
     (db.COLUNAS_CI[0], "CI 1-4 (Ct)"),
     (db.COLUNAS_CI[1], "CI 2-3 (Ct)"),
 )
+_CAMPOS_CT = frozenset(campo for campo, _ in (*_COLUNAS_CT, *_COLUNAS_CI))
 
 # Colunas exportadas, na ordem de exibição. (campo_no_banco, cabeçalho PT-BR).
 # Apenas campos do reprocesso + contexto mínimo — nunca as colunas antigas.
@@ -72,6 +73,9 @@ def _valor(r, campo: str):
     if campo == "sorotipo":
         return resultados.sorotipo_de(r)
     val = r[campo]
+    if campo in _CAMPOS_CT and not resultados.ct_detectado(val):
+        # Não deixa o sentinela interno -1 vazar para XLSX/CSV.
+        return None
     if campo in _CAMPOS_BOOLEANOS:
         return "Sim" if val else "Não"
     return val

@@ -144,7 +144,9 @@ def gerar_mapa_extracao(
     if not caminho_modelo.is_file():
         raise ErroMapaExtracao("Modelo da planilha de extração não encontrado.")
 
-    workbook = load_workbook(caminho_modelo, data_only=False)
+    # rich_text=True preserva os diferentes tamanhos de fonte dentro de uma
+    # mesma célula (por exemplo, D2 e M1 da aba Extração).
+    workbook = load_workbook(caminho_modelo, data_only=False, rich_text=True)
     try:
         if not {"Amostras", "Extração"}.issubset(workbook.sheetnames):
             raise ErroMapaExtracao("Modelo da extração não contém as abas esperadas.")

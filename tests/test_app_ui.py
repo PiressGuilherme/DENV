@@ -191,6 +191,10 @@ class TestFormatacao:
     def test_ct_nulo_vira_vazio(self):
         assert app._ct_para_display(None) == ""
 
+    def test_ct_nao_detectado_vira_vazio(self):
+        """O sentinela do termociclador não deve aparecer como ND na grade."""
+        assert app._ct_para_display(-1.0) == ""
+
     def test_ct_com_uma_casa(self):
         assert app._ct_para_display(24.3) == "24.3"
         assert app._ct_para_display(20) == "20.0"

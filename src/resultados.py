@@ -362,6 +362,21 @@ def montar_plano(df: pd.DataFrame, linhas_banco: Iterable[dict]) -> PlanoImport:
 # --------------------------------------------------------------------------- #
 
 
+def ct_detectado(valor: object) -> bool:
+    """Retorna ``True`` somente para um Ct numérico realmente detectado.
+
+    O import do termociclador preserva ``-1`` como sentinela de "não
+    detectado". Por isso, testar apenas ``is not None`` produz falso positivo
+    para resultados negativos.
+    """
+    if valor is None:
+        return False
+    try:
+        return float(valor) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def sorotipo_de(r) -> str:
     """Rótulo legível do sorotipo a partir dos Ct ('DENV-2', 'DENV-1+2', ...).
 
@@ -372,7 +387,7 @@ def sorotipo_de(r) -> str:
     detectados = [
         sorotipo[-1]  # o número do sorotipo ('DEN2' -> '2')
         for sorotipo in db.SOROTIPOS
-        if r[db.coluna_ct(sorotipo)] is not None
+        if ct_detectado(r[db.coluna_ct(sorotipo)])
     ]
     if detectados:
         # Coinfecção vira 'DENV-1+2', sem repetir o prefixo.

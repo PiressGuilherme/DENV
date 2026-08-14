@@ -322,6 +322,16 @@ class TestSorotipo:
         r = self._linha(den1_ct=24.3, den2_ct=30.0)
         assert resultados.sorotipo_de(r) == "DENV-1+2"
 
+    def test_sentinela_nao_detectado_nao_e_sorotipo_positivo(self):
+        r = self._linha(
+            den1_ct=-1.0, den2_ct=-1.0, den3_ct=-1.0, den4_ct=-1.0
+        )
+        assert resultados.sorotipo_de(r) == "Não detectado"
+
+    def test_sentinela_nao_entra_em_coinfeccao(self):
+        r = self._linha(den1_ct=-1.0, den2_ct=24.3, den3_ct=-1.0)
+        assert resultados.sorotipo_de(r) == "DENV-2"
+
     def test_nao_detectado(self):
         assert resultados.sorotipo_de(self._linha()) == "Não detectado"
 

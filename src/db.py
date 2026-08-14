@@ -591,13 +591,14 @@ def construir_filtro(
         clausulas.append("flags = ''")
 
     if sorotipo == SOROTIPO_NAO_DETECTADO:
-        # Resultado gravado, porém nenhum sorotipo detectado.
-        nenhum = " AND ".join(f"{c} IS NULL" for c in COLUNAS_CT)
+        # Resultado gravado, porém nenhum sorotipo com Ct positivo. O -1 usado
+        # pelo termociclador é sentinela de "não detectado", não um positivo.
+        nenhum = " AND ".join(f"({c} IS NULL OR {c} <= 0)" for c in COLUNAS_CT)
         clausulas.append(f"(data_resultado IS NOT NULL AND {nenhum})")
     elif sorotipo:
         if sorotipo not in SOROTIPOS:
             raise ValueError(f"sorotipo inválido: {sorotipo!r} (use {list(SOROTIPOS)})")
-        clausulas.append(f"{coluna_ct(sorotipo)} IS NOT NULL")
+        clausulas.append(f"{coluna_ct(sorotipo)} > 0")
 
     if com_resultado is True:
         clausulas.append("data_resultado IS NOT NULL")

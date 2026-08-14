@@ -118,13 +118,11 @@ def _badge_html(fase: str) -> str:
 def _ct_para_display(valor) -> str:
     """Ct para exibição: 
     - None (não testado) -> vazio
-    - -1.0 (não detectado) -> 'ND' (Not Detected)
+    - -1.0 (não detectado) -> vazio
     - >0 -> valor formatado com 1 casa decimal
     """
-    if valor is None:
+    if not resultados.ct_detectado(valor):
         return ""
-    if valor == -1.0:
-        return "ND"
     return f"{float(valor):.1f}"
 
 

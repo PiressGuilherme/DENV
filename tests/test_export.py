@@ -73,6 +73,10 @@ class TestColunas:
 
 
 class TestConteudo:
+    def test_sentinela_ct_e_exportado_como_celula_vazia(self):
+        assert export._valor({"den1_ct": -1.0}, "den1_ct") is None
+        assert export._valor({"ci_1_4_ct": -1.0}, "ci_1_4_ct") is None
+
     def test_ordenacao_canonica_preservada(self, con):
         df = _df(con)
         assert list(df["Número"]) == [2, 5, 11633]
@@ -96,6 +100,19 @@ class TestConteudo:
         where, params = db.construir_filtro(municipio="CANOAS")
         df = _df(con, where, params)
         assert list(df["Número"]) == [11633]
+
+    def test_sentinela_nao_vaza_e_nao_gera_falso_sorotipo(self, con):
+        con.execute(
+            "UPDATE amostras SET den1_ct=%s, den2_ct=%s, "
+            "data_resultado=CURRENT_TIMESTAMP WHERE chave=%s",
+            (-1.0, 24.3, "D2/25"),
+        )
+        con.commit()
+
+        linha = _df(con).set_index("Número").loc[2]
+        assert pd.isna(linha["DEN1 (Ct)"])
+        assert float(linha["DEN2 (Ct)"]) == 24.3
+        assert linha["Sorotipo"] == "DENV-2"
 
 
 class TestSerializacao:
