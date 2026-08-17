@@ -296,28 +296,26 @@ class FaseTab:
             },
             "defaultColDef": {"sortable": True, "resizable": True},
             ":getRowId": "params => params.data.chave",
+            # Callback nativo do AG Grid: o evento repassado por ui.aggrid.on()
+            # é sanitizado pelo NiceGUI e não contém `api`. Atualizar o badge
+            # no cliente evita ainda transportar todas as linhas selecionadas.
+            ":onSelectionChanged": f"""event => {{
+                const quantidade = event.api.getSelectedRows().length;
+                const badge = getHtmlElement({self.label_selecao.id});
+                if (badge) {{
+                    badge.textContent = quantidade + (
+                        quantidade === 1 ? ' selecionada' : ' selecionadas'
+                    );
+                }}
+            }}""",
             "rowData": [],
         }, html_columns=[idx_fase], auto_size_columns=False).classes(
             "w-full"
         ).style("height: 65vh")
-        self.grid.on(
-            "selectionChanged",
-            self._ao_mudar_selecao,
-            throttle=0.05,
-            js_handler="event => emit(event.api.getSelectedRows().length)",
-        )
 
     def _definir_contagem_selecao(self, quantidade: int) -> None:
         sufixo = "selecionada" if quantidade == 1 else "selecionadas"
         self.label_selecao.text = f"{quantidade} {sufixo}"
-
-    def _ao_mudar_selecao(self, evento) -> None:
-        """Recebe do navegador somente a contagem, sem transportar todas as linhas."""
-        try:
-            quantidade = max(0, int(evento.args))
-        except (TypeError, ValueError):
-            quantidade = 0
-        self._definir_contagem_selecao(quantidade)
 
     def garantir_carregado(self) -> None:
         """Carrega os dados da aba se ainda não foram carregados (lazy)."""

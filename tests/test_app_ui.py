@@ -121,19 +121,15 @@ class TestContadorDeSelecao:
         tab._definir_contagem_selecao(quantidade)
         assert tab.label_selecao.text == esperado
 
-    def test_evento_recebe_somente_a_quantidade(self):
-        fonte = inspect.getsource(app.FaseTab._montar)
-        assert '"selectionChanged"' in fonte
-        assert "event.api.getSelectedRows().length" in fonte
+    def test_callback_nativo_recebe_api_real_e_atualiza_badge(self):
+        from unittest.mock import Mock
 
-        tab = self._tab()
-        tab._ao_mudar_selecao(type("Evento", (), {"args": 7})())
-        assert tab.label_selecao.text == "7 selecionadas"
+        tab = app.FaseTab(Mock(), db.ETAPA_RESULTADO)
+        callback = tab.grid.options[":onSelectionChanged"]
 
-    def test_evento_invalido_volta_para_zero(self):
-        tab = self._tab()
-        tab._ao_mudar_selecao(type("Evento", (), {"args": None})())
-        assert tab.label_selecao.text == "0 selecionadas"
+        assert "event.api.getSelectedRows().length" in callback
+        assert f"getHtmlElement({tab.label_selecao.id})" in callback
+        assert "quantidade === 1" in callback
 
     def test_recarregar_limpa_selecao_e_contador(self):
         class Grid:
