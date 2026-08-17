@@ -267,6 +267,9 @@ class FaseTab:
                     on_click=lambda: self.app.reverter_rejeicao(self),
                 ).props("color=primary outline")
             ui.space()
+            self.label_selecao = ui.badge(
+                "0 selecionadas", color="grey", outline=True
+            ).classes("q-mr-sm")
             self.label_contagem = ui.label().classes("text-grey-7 q-mr-md")
             # Export da visão atual (respeita filtro + fase + ordenação corrente).
             with ui.button("Exportar", icon="download").props("color=secondary outline"):
@@ -297,6 +300,24 @@ class FaseTab:
         }, html_columns=[idx_fase], auto_size_columns=False).classes(
             "w-full"
         ).style("height: 65vh")
+        self.grid.on(
+            "selectionChanged",
+            self._ao_mudar_selecao,
+            throttle=0.05,
+            js_handler="event => emit(event.api.getSelectedRows().length)",
+        )
+
+    def _definir_contagem_selecao(self, quantidade: int) -> None:
+        sufixo = "selecionada" if quantidade == 1 else "selecionadas"
+        self.label_selecao.text = f"{quantidade} {sufixo}"
+
+    def _ao_mudar_selecao(self, evento) -> None:
+        """Recebe do navegador somente a contagem, sem transportar todas as linhas."""
+        try:
+            quantidade = max(0, int(evento.args))
+        except (TypeError, ValueError):
+            quantidade = 0
+        self._definir_contagem_selecao(quantidade)
 
     def garantir_carregado(self) -> None:
         """Carrega os dados da aba se ainda não foram carregados (lazy)."""
@@ -323,6 +344,9 @@ class FaseTab:
         dados = self._carregar_dados()
         self.grid.options["rowData"] = dados
         self.grid.update()
+        # A seleção anterior deixa de ser uma intenção válida após filtro/ação.
+        self.grid.run_grid_method("deselectAll")
+        self._definir_contagem_selecao(0)
         self.label_contagem.text = f"{len(dados)} amostra(s)"
         self._carregado = True
 

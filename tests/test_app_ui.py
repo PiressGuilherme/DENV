@@ -102,6 +102,65 @@ class TestColunasDaGrade:
             assert coluna["field"] in dados, f"coluna '{coluna['field']}' sem dado"
 
 
+class TestContadorDeSelecao:
+    class Label:
+        text = ""
+
+    def _tab(self):
+        tab = object.__new__(app.FaseTab)
+        tab.label_selecao = self.Label()
+        return tab
+
+    @pytest.mark.parametrize("quantidade, esperado", [
+        (0, "0 selecionadas"),
+        (1, "1 selecionada"),
+        (25, "25 selecionadas"),
+    ])
+    def test_pluralizacao(self, quantidade, esperado):
+        tab = self._tab()
+        tab._definir_contagem_selecao(quantidade)
+        assert tab.label_selecao.text == esperado
+
+    def test_evento_recebe_somente_a_quantidade(self):
+        fonte = inspect.getsource(app.FaseTab._montar)
+        assert '"selectionChanged"' in fonte
+        assert "event.api.getSelectedRows().length" in fonte
+
+        tab = self._tab()
+        tab._ao_mudar_selecao(type("Evento", (), {"args": 7})())
+        assert tab.label_selecao.text == "7 selecionadas"
+
+    def test_evento_invalido_volta_para_zero(self):
+        tab = self._tab()
+        tab._ao_mudar_selecao(type("Evento", (), {"args": None})())
+        assert tab.label_selecao.text == "0 selecionadas"
+
+    def test_recarregar_limpa_selecao_e_contador(self):
+        class Grid:
+            options = {"rowData": []}
+            atualizado = False
+            metodos = []
+
+            def update(self):
+                self.atualizado = True
+
+            def run_grid_method(self, nome):
+                self.metodos.append(nome)
+
+        tab = self._tab()
+        tab.grid = Grid()
+        tab.label_contagem = self.Label()
+        tab._carregar_dados = lambda: [{"chave": "D1/25"}]
+
+        tab.recarregar()
+
+        assert tab.grid.options["rowData"] == [{"chave": "D1/25"}]
+        assert tab.grid.atualizado is True
+        assert tab.grid.metodos == ["deselectAll"]
+        assert tab.label_selecao.text == "0 selecionadas"
+        assert tab.label_contagem.text == "1 amostra(s)"
+
+
 class TestBadgesEAbas:
     def test_badge_de_todas_as_fases(self):
         for fase in db.FASES:
