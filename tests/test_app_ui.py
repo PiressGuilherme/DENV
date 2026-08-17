@@ -187,6 +187,88 @@ class TestMapaExtracaoNaUI:
         assert avisos == ["Mapa DENV130826-1 gerado com 1 amostra(s)."]
 
 
+class TestEdicaoResultadoNaUI:
+    def test_botao_e_exclusivo_da_aba_pcr_feito(self):
+        fonte = inspect.getsource(app.FaseTab._montar)
+        assert '"Editar resultado"' in fonte
+        assert "self.fase == db.ETAPA_RESULTADO" in fonte
+
+    @pytest.mark.parametrize(
+        "selecionadas", [[], [{"chave": "D1/25"}, {"chave": "D2/25"}]]
+    )
+    def test_exige_exatamente_uma_amostra(self, monkeypatch, selecionadas):
+        class Grid:
+            async def get_selected_rows(self):
+                return selecionadas
+
+        avisos = []
+        monkeypatch.setattr(
+            app.ui, "notify", lambda mensagem, **kwargs: avisos.append(mensagem)
+        )
+        instancia = object.__new__(app.App)
+        tab = type("Tab", (), {"grid": Grid()})()
+
+        asyncio.run(instancia.abrir_dialogo_edicao_resultado(tab))
+
+        assert avisos == ["Selecione exatamente uma amostra para editar o resultado."]
+
+    def test_dialogo_cobre_denv_e_os_dois_controles_internos(self):
+        fonte = inspect.getsource(app.App.abrir_dialogo_edicao_resultado)
+        assert "db.COLUNAS_CT" in fonte
+        assert "db.COLUNAS_CI" in fonte
+        assert "resultados.ct_detectado" in fonte
+
+    def test_confirmacao_e_obrigatoria(self, monkeypatch):
+        avisos = []
+        monkeypatch.setattr(
+            app.ui, "notify", lambda mensagem, **kwargs: avisos.append(mensagem)
+        )
+        monkeypatch.setattr(
+            app.db,
+            "editar_resultado_manual",
+            lambda *_args, **_kwargs: pytest.fail("não deveria gravar sem confirmação"),
+        )
+        instancia = object.__new__(app.App)
+
+        instancia._confirmar_edicao_resultado(object(), "D1/25", {}, False)
+
+        assert avisos == ["Confirme a edição manual antes de salvar."]
+
+    def test_salva_fecha_dialogo_e_atualiza_tela(self, monkeypatch):
+        class Dialogo:
+            fechado = False
+
+            def close(self):
+                self.fechado = True
+
+        chamadas = []
+        avisos = []
+        monkeypatch.setattr(
+            app.db,
+            "editar_resultado_manual",
+            lambda con, chave, valores: (
+                chamadas.append((con, chave, valores))
+                or app.db.ResultadoEdicaoManual(True, 2, False)
+            ),
+        )
+        monkeypatch.setattr(
+            app.ui, "notify", lambda mensagem, **kwargs: avisos.append(mensagem)
+        )
+        instancia = object.__new__(app.App)
+        instancia.con = object()
+        atualizacoes = []
+        instancia.refresh = lambda: atualizacoes.append(True)
+        dialogo = Dialogo()
+        valores = {campo: None for campo in db.COLUNAS_RESULTADO}
+
+        instancia._confirmar_edicao_resultado(dialogo, "D1/25", valores, True)
+
+        assert dialogo.fechado is True
+        assert chamadas == [(instancia.con, "D1/25", valores)]
+        assert atualizacoes == [True]
+        assert avisos == ["Resultado de D1/25 atualizado (2 campo(s) alterado(s))."]
+
+
 class TestFormatacao:
     def test_ct_nulo_vira_vazio(self):
         assert app._ct_para_display(None) == ""

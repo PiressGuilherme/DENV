@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Iterable, Optional
 
 import psycopg2
@@ -55,6 +55,9 @@ class _Conn:
 
     def commit(self) -> None:
         self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
 
     def close(self) -> None:
         self._conn.close()
@@ -168,6 +171,7 @@ COLUNAS_CT: tuple[str, ...] = tuple(coluna_ct(s) for s in SOROTIPOS)
 
 # Controle Interno (CI) - duas colunas, uma por arquivo de corrida
 COLUNAS_CI: tuple[str, ...] = ("ci_1_4_ct", "ci_2_3_ct")
+COLUNAS_RESULTADO: tuple[str, ...] = (*COLUNAS_CT, *COLUNAS_CI)
 
 # Faixa plausível de Ct numa PCR em tempo real. Fora disso o valor é recusado
 # (quase sempre é erro de digitação ou coluna trocada na planilha).
@@ -204,6 +208,42 @@ def _quantizar_ct(valor) -> Decimal:
     return Decimal(str(valor)).quantize(
         Decimal(1).scaleb(-CT_DECIMAIS), rounding=ROUND_HALF_UP
     )
+
+
+class EdicaoResultadoInvalida(ValueError):
+    """Amostra ou valor incompatível com uma edição manual de resultado."""
+
+
+@dataclass(frozen=True)
+class ResultadoEdicaoManual:
+    """Resumo da atualização manual de uma única amostra."""
+
+    alterado: bool
+    campos_alterados: int
+    resultado_criado: bool = False
+
+
+def normalizar_ct_edicao(valor) -> Optional[float]:
+    """Normaliza um Ct digitado manualmente; vazio significa ausência de Ct."""
+    if valor is None:
+        return None
+    if isinstance(valor, bool):
+        raise EdicaoResultadoInvalida("Ct deve ser um número entre 0 e 50.")
+
+    texto = str(valor).strip()
+    if not texto:
+        return None
+    try:
+        ct = Decimal(texto.replace(",", "."))
+    except (InvalidOperation, TypeError, ValueError):
+        raise EdicaoResultadoInvalida(
+            "Ct deve ser um número entre 0 e 50."
+        ) from None
+
+    if not ct.is_finite() or not (Decimal("0") < ct <= Decimal(str(CT_MAX))):
+        raise EdicaoResultadoInvalida("Ct deve ser maior que 0 e no máximo 50.")
+    return float(_quantizar_ct(ct))
+
 
 CAMPOS_REPROCESSO = (
     *(e.chave for e in ETAPAS_DEF),
@@ -1047,3 +1087,128 @@ def gravar_resultados_termociclador(
 
     con.commit()
     return resultado
+
+
+# --------------------------------------------------------------------------- #
+# Edição manual de um resultado individual                                    #
+# --------------------------------------------------------------------------- #
+
+
+def buscar_resultado_edicao(con: _Conn, chave: str):
+    """Busca os valores necessários para preencher o diálogo de edição."""
+    return con.execute(
+        f"SELECT chave, ni_original, pcr_feito, rejeitada, data_resultado, "
+        f"{', '.join(COLUNAS_RESULTADO)} "
+        "FROM amostras WHERE chave = %s",
+        (chave,),
+    ).fetchone()
+
+
+def editar_resultado_manual(
+    con: _Conn,
+    chave: str,
+    valores: dict[str, object],
+) -> ResultadoEdicaoManual:
+    """Substitui atomicamente todos os Ct de uma amostra e registra auditoria.
+
+    Diferentemente do import, ``None`` aqui significa explicitamente deixar o
+    campo sem Ct. A função exige os seis campos para impedir que uma chamada
+    parcial apague silenciosamente valores que não apareceram no formulário.
+    """
+    campos_recebidos = set(valores)
+    campos_esperados = set(COLUNAS_RESULTADO)
+    if campos_recebidos != campos_esperados:
+        faltando = sorted(campos_esperados - campos_recebidos)
+        extras = sorted(campos_recebidos - campos_esperados)
+        detalhes = []
+        if faltando:
+            detalhes.append("faltando: " + ", ".join(faltando))
+        if extras:
+            detalhes.append("desconhecidos: " + ", ".join(extras))
+        sufixo = f" ({'; '.join(detalhes)})" if detalhes else ""
+        raise EdicaoResultadoInvalida(
+            "Campos inválidos para edição" + sufixo
+        )
+
+    novos: dict[str, Optional[float]] = {}
+    for campo in COLUNAS_RESULTADO:
+        try:
+            novos[campo] = normalizar_ct_edicao(valores[campo])
+        except EdicaoResultadoInvalida as e:
+            raise EdicaoResultadoInvalida(f"{campo}: {e}") from None
+
+    try:
+        row = con.execute(
+            f"SELECT pcr_feito, rejeitada, data_resultado, "
+            f"{', '.join(COLUNAS_RESULTADO)} "
+            "FROM amostras WHERE chave = %s FOR UPDATE",
+            (chave,),
+        ).fetchone()
+        if not row:
+            raise EdicaoResultadoInvalida(f"Amostra {chave} não encontrada.")
+        if not row["pcr_feito"] or row["rejeitada"]:
+            raise EdicaoResultadoInvalida(
+                "A edição só é permitida para amostras não rejeitadas em PCR feito."
+            )
+
+        def mesmo_valor_manual(atual, novo) -> bool:
+            # Na edição, NULL e o sentinela legado -1 representam igualmente
+            # um campo sem Ct. Preservá-los evita auditoria artificial ao editar
+            # outro alvo da mesma amostra.
+            if novo is None and atual is not None:
+                try:
+                    return Decimal(str(atual)) <= 0
+                except InvalidOperation:
+                    return False
+            return mesmo_ct(atual, novo)
+
+        alteracoes = [
+            {
+                "campo": campo,
+                "valor_atual": (
+                    None if row[campo] is None else float(_quantizar_ct(row[campo]))
+                ),
+                "valor_novo": novos[campo],
+            }
+            for campo in COLUNAS_RESULTADO
+            if not mesmo_valor_manual(row[campo], novos[campo])
+        ]
+        resultado_criado = row["data_resultado"] is None
+
+        if not alteracoes and not resultado_criado:
+            con.commit()  # libera o FOR UPDATE sem criar evento vazio
+            return ResultadoEdicaoManual(alterado=False, campos_alterados=0)
+
+        campos_alterados = [item["campo"] for item in alteracoes]
+        sets = ", ".join(f"{campo} = %s" for campo in campos_alterados)
+        if sets:
+            sets += ", "
+        con.execute(
+            f"UPDATE amostras SET {sets}"
+            "data_resultado = CURRENT_TIMESTAMP, atualizado_em = CURRENT_TIMESTAMP "
+            "WHERE chave = %s",
+            [*(novos[campo] for campo in campos_alterados), chave],
+        )
+
+        import json
+        registrar_evento(
+            con,
+            chave,
+            "resultado_manual",
+            json.dumps(
+                {
+                    "campos": alteracoes,
+                    "resultado_criado": resultado_criado,
+                },
+                ensure_ascii=False,
+            ),
+        )
+        con.commit()
+        return ResultadoEdicaoManual(
+            alterado=True,
+            campos_alterados=len(alteracoes),
+            resultado_criado=resultado_criado,
+        )
+    except Exception:
+        con.rollback()
+        raise

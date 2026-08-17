@@ -14,7 +14,7 @@ para sequenciamento continua listada em PCR feito, que é onde os resultados de
 PCR (Ct por sorotipo) são consultados. Por isso os cards não somam o total.
 
 A aba PCR feito tem ainda o import de resultados (xlsx/csv com NI + DEN1..DEN4),
-com prévia antes de gravar — ver abrir_dialogo_resultados e src/resultados.py.
+com prévia antes de gravar, e a edição manual auditada de uma amostra por vez.
 
 Toda ação persiste no PostgreSQL, grava evento de auditoria e atualiza as grades +
 contadores. A lógica de fase mora em db.py; aqui é só a casca de UI — as abas,
@@ -244,6 +244,11 @@ class FaseTab:
                 ).props("color=negative outline")
             # Import de resultados: só na etapa que produz PCR.
             if self.fase == db.ETAPA_RESULTADO:
+                ui.button(
+                    "Editar resultado",
+                    icon="edit",
+                    on_click=lambda: self.app.abrir_dialogo_edicao_resultado(self),
+                ).props("color=secondary outline")
                 ui.button(
                     "Importar resultados",
                     icon="upload_file",
@@ -552,7 +557,119 @@ class App:
         elegiveis = [c for c in chaves if c not in ja]
         return elegiveis, len(ja)
 
-    # -- import de resultados ---------------------------------------------- #
+    # -- resultados de PCR ------------------------------------------------- #
+    async def abrir_dialogo_edicao_resultado(self, tab: FaseTab) -> None:
+        """Edita manualmente os seis campos de resultado de uma amostra."""
+        selecionadas = await tab.grid.get_selected_rows()
+        if len(selecionadas) != 1:
+            ui.notify(
+                "Selecione exatamente uma amostra para editar o resultado.",
+                type="warning",
+            )
+            return
+
+        chave = selecionadas[0]["chave"]
+        row = db.buscar_resultado_edicao(self.con, chave)
+        if not row:
+            ui.notify(f"Amostra {chave} não encontrada.", type="negative")
+            return
+        if not row["pcr_feito"] or row["rejeitada"]:
+            ui.notify(
+                "A edição só é permitida para amostras não rejeitadas em PCR feito.",
+                type="warning",
+            )
+            return
+
+        rotulos = {
+            "den1_ct": "DEN1 (Ct)",
+            "den2_ct": "DEN2 (Ct)",
+            "den3_ct": "DEN3 (Ct)",
+            "den4_ct": "DEN4 (Ct)",
+            "ci_1_4_ct": "CI 1-4 (Ct)",
+            "ci_2_3_ct": "CI 2-3 (Ct)",
+        }
+
+        with ui.dialog() as dialogo, ui.card().classes("w-[42rem]"):
+            with ui.row().classes("w-full items-center no-wrap"):
+                ui.label("Editar resultado individual").classes("text-bold text-lg")
+                ui.space()
+                ui.button(icon="close", on_click=dialogo.close).props("flat round dense")
+
+            ni = row["ni_original"] or row["chave"]
+            ui.label(f"Amostra: {ni}").classes("text-bold")
+            ui.label(
+                "Informe somente Ct numéricos maiores que 0 e até 50. "
+                "Deixe o campo vazio quando não houver Ct; o sorotipo será "
+                "recalculado automaticamente."
+            ).classes("text-grey-7 text-sm")
+
+            inputs = {}
+            for grupo in (db.COLUNAS_CT, db.COLUNAS_CI):
+                with ui.row().classes("w-full gap-3"):
+                    for campo in grupo:
+                        valor = row[campo]
+                        inputs[campo] = ui.number(
+                            rotulos[campo],
+                            value=(
+                                float(valor)
+                                if resultados.ct_detectado(valor)
+                                else None
+                            ),
+                            min=0.01,
+                            max=db.CT_MAX,
+                            precision=db.CT_DECIMAIS,
+                            step=0.01,
+                        ).props("dense clearable").classes("grow")
+
+            confirmacao = ui.checkbox(
+                "Confirmo a substituição manual do resultado desta amostra."
+            ).props("dense")
+
+            with ui.row().classes("w-full justify-end gap-2 q-mt-md"):
+                ui.button("Cancelar", on_click=dialogo.close).props("flat")
+                ui.button(
+                    "Salvar alterações",
+                    icon="save",
+                    on_click=lambda: self._confirmar_edicao_resultado(
+                        dialogo,
+                        chave,
+                        {campo: entrada.value for campo, entrada in inputs.items()},
+                        confirmacao.value,
+                    ),
+                ).props("color=primary")
+        dialogo.open()
+
+    def _confirmar_edicao_resultado(
+        self,
+        dialogo,
+        chave: str,
+        valores: dict[str, object],
+        confirmado: bool,
+    ) -> None:
+        if not confirmado:
+            ui.notify("Confirme a edição manual antes de salvar.", type="warning")
+            return
+        try:
+            resultado = db.editar_resultado_manual(self.con, chave, valores)
+        except db.EdicaoResultadoInvalida as e:
+            ui.notify(str(e), type="negative", timeout=8000)
+            return
+        except Exception as e:  # noqa: BLE001 — falha de banco vira aviso na UI
+            ui.notify(f"Falha ao editar resultado: {e}", type="negative", timeout=8000)
+            return
+
+        dialogo.close()
+        if not resultado.alterado:
+            ui.notify("Nenhuma alteração foi necessária.", type="info")
+            return
+
+        ui.notify(
+            f"Resultado de {chave} atualizado "
+            f"({resultado.campos_alterados} campo(s) alterado(s)).",
+            type="positive",
+        )
+        self.refresh()
+
     def abrir_dialogo_resultados(self) -> None:
         """Diálogo de import de resultados de PCR (xlsx/csv com NI + DEN1..DEN4).
 

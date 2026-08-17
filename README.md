@@ -11,8 +11,9 @@ resultados da PCR. Por isso os cards de métrica não somam o total.
 
 A aba **PCR feito** também importa resultados de PCR de uma planilha
 (`NI, DEN1, DEN2, DEN3, DEN4`, valores de Ct), com prévia do que será gravado e
-do que foi ignorado antes de confirmar. Resultado já existente **nunca** é
-sobrescrito.
+do que foi ignorado antes de confirmar. O import nunca sobrescreve resultado
+existente; uma correção pontual pode ser feita pelo botão **Editar resultado**,
+para uma amostra selecionada por vez, com confirmação e evento de auditoria.
 
 Na aba **Coletadas**, as amostras selecionadas podem gerar diretamente o mapa de
 trabalho de extração em uma placa de 96 poços. O arquivo preserva o formulário
@@ -253,4 +254,3 @@ tirar o estado atual:
 - **Porta local**: padrão 8080. Para mudar: variável `PORT` ou ajuste em `src/app.py`.
 - **Autenticação**: ativada automaticamente quando `APP_EMAIL` e `APP_PASS` estão definidos.
   Localmente (sem essas variáveis), o acesso é direto.
-
